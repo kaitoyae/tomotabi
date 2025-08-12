@@ -1903,7 +1903,7 @@ export default function CreatePlanPage() {
                         </span>
                       )}
                       
-                      {!spot.isAccommodation && (
+                      {!spot.isLodging && (
                         <>
                           <input
                             type="number"
