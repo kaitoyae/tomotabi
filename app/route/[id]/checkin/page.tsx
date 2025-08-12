@@ -1073,7 +1073,7 @@ export default function CheckInPage() {
     }
     
     // 選択されたルートに合わせて地図の境界を調整（初回のみ）
-    if (bounds && currentLocation && currentSpot && routes.length > 0) {
+    if (bounds instanceof maplibregl.LngLatBounds && currentLocation && currentSpot && routes.length > 0) {
       // 現在地と目的地も境界に含める
       bounds.extend(currentLocation as [number, number])
       bounds.extend([currentSpot.lng, currentSpot.lat] as [number, number])
