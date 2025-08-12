@@ -1073,15 +1073,16 @@ export default function CheckInPage() {
     }
     
     // 選択されたルートに合わせて地図の境界を調整（初回のみ）
-    if (bounds instanceof maplibregl.LngLatBounds && currentLocation && currentSpot && routes.length > 0) {
+    if (bounds !== null && currentLocation && currentSpot && routes.length > 0) {
       // 現在地と目的地も境界に含める
-      bounds.extend(currentLocation as [number, number])
-      bounds.extend([currentSpot.lng, currentSpot.lat] as [number, number])
+      const lngLatBounds = bounds as maplibregl.LngLatBounds
+      lngLatBounds.extend(currentLocation as [number, number])
+      lngLatBounds.extend([currentSpot.lng, currentSpot.lat] as [number, number])
       
       // パディングを追加して地図を調整
       setTimeout(() => {
         if (map && map.loaded()) {
-          map.fitBounds(bounds!, {
+          map.fitBounds(lngLatBounds, {
             padding: { top: 200, bottom: 150, left: 50, right: 50 },
             duration: 1000,
             maxZoom: 16
