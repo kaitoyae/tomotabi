@@ -1,0 +1,7 @@
+{
+  "/home/page": "app/home/page.js",
+  "/route/[id]/checkin/page": "app/route/[id]/checkin/page.js",
+  "/plan/complete/page": "app/plan/complete/page.js",
+  "/plan/preview/page": "app/plan/preview/page.js",
+  "/plan/create/page": "app/plan/create/page.js"
+}

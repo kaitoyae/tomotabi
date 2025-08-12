@@ -1,0 +1,37 @@
+{
+  "name": "トモタビ",
+  "short_name": "トモタビ",
+  "description": "旅先のプランも、地元の視点も、誰でも簡単に共有できるルートSNS",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#3B82F6",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/images/logo_tomotabi.png",
+      "sizes": "64x64",
+      "type": "image/png"
+    },
+    {
+      "src": "/images/logo_tomotabi.png",
+      "sizes": "128x128",
+      "type": "image/png"
+    },
+    {
+      "src": "/images/logo_tomotabi.png",
+      "sizes": "256x256",
+      "type": "image/png"
+    },
+    {
+      "src": "/images/logo_tomotabi.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/images/logo_tomotabi.png",
+      "sizes": "1024x1024",
+      "type": "image/png"
+    }
+  ]
+}

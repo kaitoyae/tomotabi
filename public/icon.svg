@@ -1,0 +1,7 @@
+<svg width="192" height="192" viewBox="0 0 192 192" xmlns="http://www.w3.org/2000/svg">
+  <rect width="192" height="192" rx="24" fill="#3B82F6"/>
+  <circle cx="96" cy="80" r="12" fill="white"/>
+  <path d="M96 92 L84 104 L96 116 L108 104 Z" fill="white"/>
+  <path d="M72 120 Q96 140 120 120" stroke="white" stroke-width="4" fill="none"/>
+  <text x="96" y="150" text-anchor="middle" fill="white" font-family="sans-serif" font-size="16" font-weight="bold">トモタビ</text>
+</svg>
