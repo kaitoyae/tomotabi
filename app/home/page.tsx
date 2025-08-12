@@ -1485,11 +1485,8 @@ export default function HomePage() {
       console.log('🔍 最初の5件のルート座標詳細:')
       routes.slice(0, 5).forEach((route, index) => {
         console.log(`  ${index + 1}. ${route.title}`)
-        console.log(`     spots配列: ${route.spots ? '存在' : '無し'} (長さ: ${route.spots?.length || 0})`)
+        console.log(`     spotCount: ${route.spotCount}`)
         console.log(`     coordinates配列: ${route.coordinates ? '存在' : '無し'} (長さ: ${route.coordinates?.length || 0})`)
-        if (route.spots && route.spots.length > 0) {
-          console.log(`     最初のspot座標: [${route.spots[0].lng}, ${route.spots[0].lat}]`)
-        }
         if (route.coordinates && route.coordinates.length > 0) {
           console.log(`     最初のcoordinate: [${route.coordinates[0][0]}, ${route.coordinates[0][1]}]`)
         }
