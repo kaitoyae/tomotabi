@@ -45,3 +45,5 @@
   # Certificates
   certs/
 node_modules/
+.next/
+*.backup
