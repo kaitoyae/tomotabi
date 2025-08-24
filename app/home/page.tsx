@@ -10,6 +10,8 @@ import { fetchSpotsFromOverpass, fetchAddressFromNominatim, fetchSpotsFromOverpa
 import type { OverpassSpot, RouteSpot, SpotCategory, SearchChip, AreaOption, FilterState, DeviceOrientationEventWithWebkit, PrefectureBoundaryData } from './types'
 // 定数インポート
 import { SPOT_CATEGORIES, AREA_OPTIONS, CACHE_DURATION, DUMMY_ROUTES, BUDGET_OPTIONS, REGIONS, PREFECTURES_BY_REGION } from './constants'
+// ユーティリティ関数インポート
+import { formatDuration, getMarkerIcon, parseNaturalText } from './utils'
 
 
 
@@ -80,39 +82,6 @@ const CategoryIcon = ({ iconType, className = "w-6 h-6" }: { iconType: string, c
   }
 }
 
-// 所要時間を適切な単位で表示するヘルパー関数
-const formatDuration = (minutes: number): string => {
-  if (minutes < 60) {
-    return `${minutes}分`
-  } else if (minutes < 1440) { // 24時間未満
-    const hours = Math.floor(minutes / 60)
-    const mins = minutes % 60
-    if (mins === 0) {
-      return `${hours}時間`
-    } else {
-      return `${hours}時間${mins}分`
-    }
-  } else { // 24時間以上
-    const days = Math.floor(minutes / 1440)
-    const remainingMinutes = minutes % 1440
-    if (remainingMinutes === 0) {
-      return `${days}日`
-    } else {
-      const hours = Math.floor(remainingMinutes / 60)
-      const mins = remainingMinutes % 60
-      if (hours === 0) {
-        return `${days}日${mins}分`
-      } else if (mins === 0) {
-        return `${days}日${hours}時間`
-      } else {
-        return `${days}日${hours}時間${mins}分`
-      }
-    }
-  }
-}
-
-
-
 // Overpass API関連の関数
 const buildOverpassQuery = (
   lat: number, 
@@ -133,71 +102,6 @@ out geom;`
 
 // buildOverpassBoundsQuery は ./api に移動
 
-// スポットをグリッド状にバランスよく分散させる関数
-const distributeSpotsByGrid = (
-  spots: OverpassSpot[], 
-  bounds: maplibregl.LngLatBounds, 
-  maxSpots: number
-): OverpassSpot[] => {
-  if (spots.length <= maxSpots) return spots
-  
-  const ne = bounds.getNorthEast()
-  const sw = bounds.getSouthWest()
-  
-  // 4x4のグリッドを作成（16エリア）
-  const gridSize = 4
-  const latStep = (ne.lat - sw.lat) / gridSize
-  const lngStep = (ne.lng - sw.lng) / gridSize
-  
-  console.log('🎯 グリッド分散開始:', {
-    totalSpots: spots.length,
-    targetSpots: maxSpots,
-    gridSize,
-    bounds: { south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng }
-  })
-  
-  // グリッドごとにスポットを分類
-  const grid: OverpassSpot[][][] = Array(gridSize).fill(null).map(() => 
-    Array(gridSize).fill(null).map(() => [])
-  )
-  
-  spots.forEach(spot => {
-    const gridRow = Math.min(Math.floor((spot.lat - sw.lat) / latStep), gridSize - 1)
-    const gridCol = Math.min(Math.floor((spot.lng - sw.lng) / lngStep), gridSize - 1)
-    grid[gridRow][gridCol].push(spot)
-  })
-  
-  // 各グリッドから均等にスポットを選択
-  const spotsPerGrid = Math.max(1, Math.floor(maxSpots / (gridSize * gridSize)))
-  const result: OverpassSpot[] = []
-  
-  for (let row = 0; row < gridSize; row++) {
-    for (let col = 0; col < gridSize; col++) {
-      const cellSpots = grid[row][col]
-      if (cellSpots.length > 0) {
-        // このセルから最大spotsPerGrid個選択
-        const selectedFromCell = cellSpots.slice(0, spotsPerGrid)
-        result.push(...selectedFromCell)
-      }
-    }
-  }
-  
-  // 目標数に満たない場合は残りのスポットからランダムに追加
-  if (result.length < maxSpots) {
-    const remainingSpots = spots.filter(spot => !result.some(s => s.id === spot.id))
-    const additionalNeeded = maxSpots - result.length
-    const additional = remainingSpots.slice(0, additionalNeeded)
-    result.push(...additional)
-  }
-  
-  console.log('✅ グリッド分散完了:', {
-    originalCount: spots.length,
-    distributedCount: result.length,
-    spotsPerGrid
-  })
-  
-  return result.slice(0, maxSpots)
-}
 
 // fetchSpotsFromOverpass は ./api に移動
 
@@ -205,70 +109,11 @@ const distributeSpotsByGrid = (
 
 // fetchAddressFromNominatim は ./api に移動
 
-// スポットにマーカーアイコンを追加する関数（SVG）
-const getMarkerIcon = (spot: OverpassSpot, isSelected: boolean = false): string => {
-  const category = SPOT_CATEGORIES.find(cat => 
-    spot.type === cat.id || 
-    (cat.id === 'restaurant' && ['restaurant', 'cafe', 'fast_food', 'bar', 'pub'].includes(spot.type)) ||
-    (cat.id === 'tourism' && ['attraction', 'museum', 'gallery', 'viewpoint', 'artwork'].includes(spot.type)) ||
-    (cat.id === 'shopping' && ['clothes', 'books', 'gift', 'mall', 'supermarket'].includes(spot.type)) ||
-    (cat.id === 'leisure' && ['cinema', 'theatre', 'casino', 'nightclub'].includes(spot.type)) ||
-    (cat.id === 'culture' && ['place_of_worship'].includes(spot.type)) ||
-    (cat.id === 'nature' && ['park', 'garden', 'nature_reserve', 'beach', 'peak'].includes(spot.type)) ||
-    (cat.id === 'onsen' && ['spa', 'public_bath', 'hot_spring'].includes(spot.type))
-  )
-  
-  const iconType = category?.icon || 'default'
-  
-  switch (iconType) {
-    case 'nature':
-      return '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 10v.2A3 3 0 0 1 8.9 16H5a3 3 0 0 1-1-5.8V10a3 3 0 0 1 6 0Z"/><path d="M7 16v6"/><path d="M13 19v3"/><path d="M12 19h8.3a1 1 0 0 0 .7-1.7L18 14h.3a1 1 0 0 0 .7-1.7L16 9h.2a1 1 0 0 0 .8-1.7L13 3l-1.4 1.5"/></svg>'
-    case 'culture':
-      return '<svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="3" x2="21" y1="22" y2="22"/><line x1="6" x2="6" y1="18" y2="11"/><line x1="10" x2="10" y1="18" y2="11"/><line x1="14" x2="14" y1="18" y2="11"/><line x1="18" x2="18" y1="18" y2="11"/><polygon points="12,2 20,7 4,7"/></svg>'
-    case 'restaurant':
-      return '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/></svg>'
-    case 'onsen':
-      return '<img src="/images/svgicon/onsen.svg" alt="温泉" width="12" height="12" style="filter: brightness(0);" />'
-    case 'shopping':
-      return '<svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l-1 12H6L5 9z"/></svg>'
-    case 'leisure':
-      return '<svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1.01M15 10h1.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>'
-    case 'accommodation':
-      return '<svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>'
-    default:
-      return '<svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>'
-  }
-}
 
 // キャッシュ機能は api.ts に移行済み
 
 // 人気タグのダミーデータ
 
-
-
-
-
-// 自然文パース用の簡単なパターンマッチング
-const parseNaturalText = (text: string): SearchChip[] => {
-  const chips: SearchChip[] = []
-  const lowerText = text.toLowerCase()
-  
-  // 予算パターン
-  const budgetMatch = text.match(/[〜～]?¥?(\d+)[円]?/)
-  if (budgetMatch) {
-    const amount = budgetMatch[1]
-    chips.push({
-      id: `budget-${amount}`,
-      type: 'budget',
-      label: `~¥${amount}`,
-      value: amount
-    })
-  }
-  
-  
-  
-  return chips
-}
 
 
 
