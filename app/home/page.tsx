@@ -4,74 +4,18 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
+import { fetchSpotsFromOverpass, fetchAddressFromNominatim, fetchSpotsFromOverpassBounds, fetchPrefectureBoundaryData } from './api'
+
+// 型定義インポート
+import type { OverpassSpot, RouteSpot, SpotCategory, SearchChip, AreaOption, FilterState, DeviceOrientationEventWithWebkit, PrefectureBoundaryData } from './types'
+// 定数インポート
+import { SPOT_CATEGORIES, AREA_OPTIONS, CACHE_DURATION, DUMMY_ROUTES, BUDGET_OPTIONS, REGIONS, PREFECTURES_BY_REGION } from './constants'
 
 
-// Overpass APIから取得するスポット情報の型定義
-type OverpassSpot = {
-  id: string
-  name: string
-  lat: number
-  lng: number
-  type: string // amenity, tourism, shop, etc.
-  subtype: string // restaurant, museum, clothing, etc.
-  address?: string
-  website?: string
-  phone?: string
-  opening_hours?: string
-  description?: string
-}
 
-// 作成中のルートのスポット情報
-type RouteSpot = {
-  id: string
-  name: string
-  lat: number
-  lng: number
-  address?: string
-  stayTime: number // 滞在時間（分）
-  addedAt: Date
-}
 
-// 検索チップの型定義
-type SearchChip = {
-  id: string
-  type: 'budget' | 'tag' | 'area' | 'spot'
-  label: string
-  value: string
-}
 
-// スポットカテゴリーの定義
-type SpotCategory = {
-  id: string
-  label: string
-  overpassQuery: string
-  icon: string
-}
 
-// エリア選択の定義
-type AreaOption = {
-  id: string
-  label: string
-  lat: number
-  lng: number
-  radius: number // km
-}
-
-// 絞り込み条件の状態
-type FilterState = {
-  budget: string | null // '1000', '2000', '3000', 'custom:1000-3000'
-  area: {
-    type: 'distance' | 'location' | 'name' | null
-    value: string | null // '1km', '3km', '5km' | '139.8107,35.7101' | '浅草'
-  }
-  tags: string[] // 最大3つ
-  customBudget: { min: number, max: number } | null
-}
-
-// DeviceOrientationEventの型拡張
-interface DeviceOrientationEventWithWebkit extends DeviceOrientationEvent {
-  webkitCompassHeading?: number
-}
 
 // カテゴリアイコンコンポーネント
 const CategoryIcon = ({ iconType, className = "w-6 h-6" }: { iconType: string, className?: string }) => {
@@ -167,62 +111,7 @@ const formatDuration = (minutes: number): string => {
   }
 }
 
-// スポットカテゴリーの定義
-const SPOT_CATEGORIES: SpotCategory[] = [
-  {
-    id: 'nature',
-    label: '自然',
-    overpassQuery: '["leisure"~"^(park|garden|nature_reserve)$"]["name"];["natural"~"^(beach|peak)$"]["name"]',
-    icon: 'nature'
-  },
-  {
-    id: 'culture',
-    label: '文化・芸術', 
-    overpassQuery: '["historic"]["historic"!="no"]["name"];["amenity"~"^(place_of_worship)$"]["name"];["tourism"~"^(museum|gallery)$"]["name"]',
-    icon: 'culture'
-  },
-  {
-    id: 'restaurant',
-    label: '飲食店',
-    overpassQuery: 'amenity~"^(restaurant|cafe|fast_food|bar|pub)$"',
-    icon: 'restaurant'
-  },
-  {
-    id: 'onsen',
-    label: '温泉',
-    overpassQuery: '["leisure"~"^(spa)$"]["name"];["amenity"~"^(public_bath)$"]["name"];["natural"="hot_spring"]["name"]',
-    icon: 'onsen'
-  },
-  {
-    id: 'shopping',
-    label: 'お買い物',
-    overpassQuery: '["shop"~"^(clothes|books|gift|mall|supermarket)$"]["name"]',
-    icon: 'shopping'
-  },
-  {
-    id: 'leisure',
-    label: 'レジャー施設',
-    overpassQuery: '["amenity"~"^(cinema|theatre)$"]["name"];["leisure"~"^(amusement_arcade|bowling_alley)$"]["name"]',
-    icon: 'leisure'
-  },
-  {
-    id: 'accommodation',
-    label: '宿泊施設',
-    overpassQuery: '["tourism"~"^(hotel|guest_house|hostel|motel)$"]["name"]',
-    icon: 'accommodation'
-  }
-]
 
-// エリア選択オプション
-const AREA_OPTIONS: AreaOption[] = [
-  { id: 'current', label: '現在地周辺', lat: 0, lng: 0, radius: 2 },
-  { id: 'shibuya', label: '渋谷', lat: 35.6598, lng: 139.7006, radius: 2 },
-  { id: 'shinjuku', label: '新宿', lat: 35.6896, lng: 139.6917, radius: 2 },
-  { id: 'asakusa', label: '浅草', lat: 35.7148, lng: 139.7967, radius: 2 },
-  { id: 'akihabara', label: '秋葉原', lat: 35.7022, lng: 139.7745, radius: 1.5 },
-  { id: 'ginza', label: '銀座', lat: 35.6762, lng: 139.7631, radius: 1.5 },
-  { id: 'harajuku', label: '原宿', lat: 35.6702, lng: 139.7026, radius: 1.5 }
-]
 
 // Overpass API関連の関数
 const buildOverpassQuery = (
@@ -242,26 +131,7 @@ out geom;`
   return query
 }
 
-// バウンディングボックス用のOverpass APIクエリ構築
-const buildOverpassBoundsQuery = (
-  south: number, 
-  west: number, 
-  north: number, 
-  east: number, 
-  categories: string[] = ['restaurant']
-): string => {
-  // バウンディングボックス形式: (south,west,north,east)
-  const bbox = `${south},${west},${north},${east}`
-  
-  const query = `[out:json][timeout:25];
-(
-  node["amenity"~"^(restaurant|cafe|fast_food|bar|pub)$"]["name"](${bbox});
-  way["amenity"~"^(restaurant|cafe|fast_food|bar|pub)$"]["name"](${bbox});
-);
-out geom;`
-  
-  return query
-}
+// buildOverpassBoundsQuery は ./api に移動
 
 // スポットをグリッド状にバランスよく分散させる関数
 const distributeSpotsByGrid = (
@@ -329,151 +199,11 @@ const distributeSpotsByGrid = (
   return result.slice(0, maxSpots)
 }
 
-// Overpass APIからスポットを取得（円形検索）
-const fetchSpotsFromOverpass = async (
-  lat: number, 
-  lng: number, 
-  radius: number = 2, 
-  categories: string[] = ['restaurant']
-): Promise<OverpassSpot[]> => {
-  try {
-    const query = buildOverpassQuery(lat, lng, radius, categories)
-    console.log('🔍 Overpass APIクエリ（円形）:', query)
-    
-    const response = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: query
-    })
-    
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('❌ Overpass API error response:', errorText)
-      throw new Error(`Overpass API error: ${response.status}`)
-    }
-    
-    const data = await response.json()
-    console.log('📍 Overpass API生データ（円形）:', data)
-    
-    if (!data.elements || !Array.isArray(data.elements)) {
-      console.log('⚠️ 要素が見つかりません')
-      return []
-    }
-    
-    const filteredSpots = data.elements
-      .filter((element: any) => {
-        const hasCoords = element.lat && element.lon
-        const hasName = element.tags?.name
-        return hasCoords && hasName
-      })
-      .slice(0, 20) // 最大20件に制限
-      .map((element: any) => ({
-        id: `${element.type}_${element.id}`,
-        name: element.tags.name || 'Unknown',
-        lat: element.lat || (element.center ? element.center.lat : 0),
-        lng: element.lon || (element.center ? element.center.lon : 0),
-        type: element.tags.amenity || element.tags.tourism || element.tags.shop || element.tags.historic || element.tags.leisure || element.tags.natural || 'other',
-        subtype: element.tags.cuisine || element.tags.tourism || element.tags.shop || element.tags.historic || 'general',
-        address: element.tags['addr:full'] || 
-                `${element.tags['addr:housenumber'] || ''} ${element.tags['addr:street'] || ''}`.trim() || undefined,
-        website: element.tags.website,
-        phone: element.tags.phone,
-        opening_hours: element.tags.opening_hours,
-        description: element.tags.description
-      }))
-    
-    console.log(`✅ Overpass APIから取得完了（円形）: ${filteredSpots.length} 件`)
-    return filteredSpots
-  } catch (error) {
-    console.error('Overpass API error:', error)
-    return []
-  }
-}
+// fetchSpotsFromOverpass は ./api に移動
 
-// Overpass APIからスポットを取得（矩形範囲検索・バランス分散版）
-const fetchSpotsFromOverpassBounds = async (
-  bounds: maplibregl.LngLatBounds,
-  categories: string[] = ['restaurant']
-): Promise<OverpassSpot[]> => {
-  try {
-    const ne = bounds.getNorthEast()
-    const sw = bounds.getSouthWest()
-    
-    // バウンディングボックスクエリを構築
-    const query = buildOverpassBoundsQuery(sw.lat, sw.lng, ne.lat, ne.lng, categories)
-    console.log('🔍 Overpass APIクエリ（矩形）:', query)
-    
-    const response = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: query
-    })
-    
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('❌ Overpass API error response:', errorText)
-      throw new Error(`Overpass API error: ${response.status}`)
-    }
-    
-    const data = await response.json()
-    console.log('📍 Overpass API生データ（矩形）:', data)
-    
-    if (!data.elements || !Array.isArray(data.elements)) {
-      console.log('⚠️ 要素が見つかりません')
-      return []
-    }
-    
-    // より多くのスポットを取得してからバランスよく分散
-    let allSpots = data.elements
-      .filter((element: any) => {
-        const hasCoords = element.lat && element.lon
-        const hasName = element.tags?.name
-        return hasCoords && hasName
-      })
-      .map((element: any) => ({
-        id: `${element.type}_${element.id}`,
-        name: element.tags.name || 'Unknown',
-        lat: element.lat || (element.center ? element.center.lat : 0),
-        lng: element.lon || (element.center ? element.center.lon : 0),
-        type: element.tags.amenity || element.tags.tourism || element.tags.shop || element.tags.historic || element.tags.leisure || element.tags.natural || 'other',
-        subtype: element.tags.cuisine || element.tags.tourism || element.tags.shop || element.tags.historic || 'general',
-        address: element.tags['addr:full'] || 
-                `${element.tags['addr:housenumber'] || ''} ${element.tags['addr:street'] || ''}`.trim() || undefined,
-        website: element.tags.website,
-        phone: element.tags.phone,
-        opening_hours: element.tags.opening_hours,
-        description: element.tags.description
-      }))
-    
-    // 地理的にバランスよく分散させる
-    const balancedSpots = distributeSpotsByGrid(allSpots, bounds, 20)
-    
-    console.log(`✅ Overpass APIから取得完了（矩形・バランス分散）: ${balancedSpots.length} 件`)
-    return balancedSpots
-  } catch (error) {
-    console.error('Overpass API bounds error:', error)
-    return []
-  }
-}
+// fetchSpotsFromOverpassBounds は ./api に移動（boundsは数値境界で引き渡し）
 
-// Nominatim APIで住所を取得（補完用）
-const fetchAddressFromNominatim = async (lat: number, lng: number): Promise<string | undefined> => {
-  try {
-    const response = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`
-    )
-    
-    if (!response.ok) return undefined
-    
-    const data = await response.json()
-    if (data.display_name) {
-      return data.display_name
-    }
-  } catch (error) {
-    console.error('Nominatim API error:', error)
-  }
-  return undefined
-}
+// fetchAddressFromNominatim は ./api に移動
 
 // スポットにマーカーアイコンを追加する関数（SVG）
 const getMarkerIcon = (spot: OverpassSpot, isSelected: boolean = false): string => {
@@ -512,7 +242,6 @@ const getMarkerIcon = (spot: OverpassSpot, isSelected: boolean = false): string 
 
 // キャッシュ機能（メモリベース）
 const spotsCache = new Map<string, { data: OverpassSpot[], timestamp: number }>()
-const CACHE_DURATION = 10 * 60 * 1000 // 10分
 
 // キャッシュキーを生成
 const getCacheKey = (lat: number, lng: number, radius: number, categories: string[]): string => {
@@ -542,67 +271,10 @@ const setCachedSpots = (cacheKey: string, spots: OverpassSpot[]): void => {
 }
 
 // 人気タグのダミーデータ
-const POPULAR_TAGS = [
-  'カフェ', '歴史', 'デート', 'ドライブ', '子連れ', '夜景', 
-  '朝活', '雨の日', '公園', '美術館', '神社仏閣', 'ショッピング',
-  'グルメ', '温泉', '自然', '写真映え'
-]
 
-// ダミーのルートデータ
-const DUMMY_ROUTES = [
-  {
-    id: 'route-1',
-    title: '東京下町散歩',
-    duration: 180, // 分
-    tags: ['歴史', '神社仏閣', 'グルメ'],
-    author: '山田太郎',
-    spotCount: 5
-  },
-  {
-    id: 'route-2', 
-    title: '原宿・表参道カフェ巡り',
-    duration: 240,
-    tags: ['カフェ', 'ショッピング', '写真映え'],
-    author: '鈴木花子',
-    spotCount: 6
-  },
-  {
-    id: 'route-3',
-    title: '鎌倉日帰り旅行',
-    duration: 480,
-    tags: ['歴史', '自然', '神社仏閣'],
-    author: '佐藤次郎',
-    spotCount: 8
-  }
-]
 
-// 予算選択肢
-const BUDGET_OPTIONS = [
-  { label: '指定なし', value: null },
-  { label: '~¥1,000', value: '1000' },
-  { label: '~¥2,000', value: '2000' },
-  { label: '~¥3,000', value: '3000' },
-  { label: '指定...', value: 'custom' }
-]
 
-// 地方と都道府県のデータ
-const REGIONS = [
-  { id: 'hokkaido', name: '北海道・東北' },
-  { id: 'kanto', name: '関東' },
-  { id: 'chubu', name: '中部' },
-  { id: 'kansai', name: '関西' },
-  { id: 'chugoku-shikoku', name: '中国・四国' },
-  { id: 'kyushu-okinawa', name: '九州・沖縄' }
-]
 
-const PREFECTURES_BY_REGION: Record<string, string[]> = {
-  'hokkaido': ['北海道', '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県'],
-  'kanto': ['茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県'],
-  'chubu': ['新潟県', '富山県', '石川県', '福井県', '山梨県', '長野県', '岐阜県', '静岡県', '愛知県'],
-  'kansai': ['三重県', '滋賀県', '京都府', '大阪府', '兵庫県', '奈良県', '和歌山県'],
-  'chugoku-shikoku': ['鳥取県', '島根県', '岡山県', '広島県', '山口県', '徳島県', '香川県', '愛媛県', '高知県'],
-  'kyushu-okinawa': ['福岡県', '佐賀県', '長崎県', '熊本県', '大分県', '宮崎県', '鹿児島県', '沖縄県']
-}
 
 // 自然文パース用の簡単なパターンマッチング
 const parseNaturalText = (text: string): SearchChip[] => {
@@ -621,30 +293,7 @@ const parseNaturalText = (text: string): SearchChip[] => {
     })
   }
   
-  // タグパターン（人気タグとの完全一致）
-  POPULAR_TAGS.forEach(tag => {
-    if (text.includes(tag)) {
-      chips.push({
-        id: `tag-${tag}`,
-        type: 'tag',
-        label: tag,
-        value: tag
-      })
-    }
-  })
   
-  // エリアパターン（簡単な地名）
-  const areaPatterns = ['浅草', '新宿', '渋谷', '池袋', '上野', '銀座', '表参道', '原宿']
-  areaPatterns.forEach(area => {
-    if (text.includes(area)) {
-      chips.push({
-        id: `area-${area}`,
-        type: 'area',
-        label: area,
-        value: area
-      })
-    }
-  })
   
   return chips
 }
@@ -1126,121 +775,86 @@ export default function HomePage() {
   }
 
   // GeoJSONからBounding Boxを計算する関数
-  const calculateBBox = (geojson: any): [number, number, number, number] | null => {
-    if (!geojson || !geojson.coordinates) return null
-    
-    let minLng = Infinity, minLat = Infinity
-    let maxLng = -Infinity, maxLat = -Infinity
-    
-    const processCoordinates = (coords: any) => {
-      if (Array.isArray(coords[0])) {
-        coords.forEach(processCoordinates)
-      } else {
-        const [lng, lat] = coords
-        minLng = Math.min(minLng, lng)
-        maxLng = Math.max(maxLng, lng)
-        minLat = Math.min(minLat, lat)
-        maxLat = Math.max(maxLat, lat)
-      }
+  // 県境界データを地図に適用するヘルパー関数
+  const applyPrefectureBoundaryToMap = (
+    mapInstance: maplibregl.Map,
+    boundaryData: PrefectureBoundaryData
+  ) => {
+    // 既存の県境レイヤーがあれば削除
+    if (mapInstance.getLayer('prefecture-fill')) {
+      mapInstance.removeLayer('prefecture-fill')
+    }
+    if (mapInstance.getLayer('prefecture-outline')) {
+      mapInstance.removeLayer('prefecture-outline')
+    }
+    if (mapInstance.getSource('prefecture-boundary')) {
+      mapInstance.removeSource('prefecture-boundary')
     }
     
-    if (geojson.type === 'Polygon') {
-      geojson.coordinates.forEach(processCoordinates)
-    } else if (geojson.type === 'MultiPolygon') {
-      geojson.coordinates.forEach((polygon: any) => {
-        polygon.forEach(processCoordinates)
+    // GeoJSON境界データがある場合
+    if (boundaryData.geojson) {
+      // GeoJSONソースを追加
+      mapInstance.addSource('prefecture-boundary', {
+        type: 'geojson',
+        data: boundaryData.geojson
+      })
+      
+      // 県境の塗りつぶしレイヤー（薄い色）
+      mapInstance.addLayer({
+        id: 'prefecture-fill',
+        type: 'fill',
+        source: 'prefecture-boundary',
+        paint: {
+          'fill-color': '#2db5a5',
+          'fill-opacity': 0.1
+        }
+      })
+      
+      // 県境のアウトラインレイヤー（濃い色）
+      mapInstance.addLayer({
+        id: 'prefecture-outline',
+        type: 'line',
+        source: 'prefecture-boundary',
+        paint: {
+          'line-color': '#2db5a5',
+          'line-width': 3,
+          'line-opacity': 0.8
+        }
+      })
+      
+      // バウンディングボックスがある場合、地図を移動
+      if (boundaryData.bbox) {
+        mapInstance.fitBounds(boundaryData.bbox, {
+          padding: 50, // 境界から50pxの余白
+          speed: 1.2,
+          maxZoom: 11 // 最大ズームレベルを制限（県全体を見せるため）
+        })
+      }
+    } else if (boundaryData.coordinates) {
+      // 境界データがない場合は座標で移動
+      mapInstance.flyTo({
+        center: [boundaryData.coordinates.lng, boundaryData.coordinates.lat],
+        zoom: 8, // 県全体が見える縮尺
+        speed: 1.2
       })
     }
-    
-    return [minLng, minLat, maxLng, maxLat]
   }
 
+  // calculateBBox関数は api.ts に移行済み
   // 県境データを取得してハイライト表示する関数
   const fetchAndShowPrefectureBoundary = async (prefecture: string) => {
     if (!map.current) return
     
     try {
-      // Nominatim APIで県の境界データを取得
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(prefecture + ', Japan')}&limit=1&polygon_geojson=1&addressdetails=1`
-      )
-      const results = await response.json()
+      // 純粋API関数を呼び出して県境界データを取得
+      const boundaryData = await fetchPrefectureBoundaryData(prefecture)
       
-      if (results.length > 0 && results[0].geojson) {
-        const result = results[0]
-        const geojson = result.geojson
-        
-        // 既存の県境レイヤーがあれば削除
-        if (map.current.getLayer('prefecture-fill')) {
-          map.current.removeLayer('prefecture-fill')
-        }
-        if (map.current.getLayer('prefecture-outline')) {
-          map.current.removeLayer('prefecture-outline')
-        }
-        if (map.current.getSource('prefecture-boundary')) {
-          map.current.removeSource('prefecture-boundary')
-        }
-        
-        // GeoJSONソースを追加
-        map.current.addSource('prefecture-boundary', {
-          type: 'geojson',
-          data: geojson
-        })
-        
-        // 県境の塗りつぶしレイヤー（薄い色）
-        map.current.addLayer({
-          id: 'prefecture-fill',
-          type: 'fill',
-          source: 'prefecture-boundary',
-          paint: {
-            'fill-color': '#2db5a5',
-            'fill-opacity': 0.1
-          }
-        })
-        
-        // 県境のアウトラインレイヤー（濃い色）
-        map.current.addLayer({
-          id: 'prefecture-outline',
-          type: 'line',
-          source: 'prefecture-boundary',
-          paint: {
-            'line-color': '#2db5a5',
-            'line-width': 3,
-            'line-opacity': 0.8
-          }
-        })
-        
-        // 県全体がちょうど見える縮尺で地図を移動
-        const bbox = calculateBBox(geojson)
-        if (bbox) {
-          map.current.fitBounds(bbox, {
-            padding: 50, // 境界から50pxの余白
-            speed: 1.2,
-            maxZoom: 11 // 最大ズームレベルを制限（県全体を見せるため）
-          })
-        }
-        
-      } else {
-        // 境界データが取得できない場合は座標で移動
-        const coordResponse = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(prefecture + ', Japan')}&limit=1&addressdetails=1`
-        )
-        const coordResults = await coordResponse.json()
-        
-        if (coordResults.length > 0) {
-          const result = coordResults[0]
-          const lat = parseFloat(result.lat)
-          const lon = parseFloat(result.lon)
-          
-          map.current.flyTo({
-            center: [lon, lat],
-            zoom: 8, // 県全体が見える縮尺
-            speed: 1.2
-          })
-        }
+      if (boundaryData) {
+        // 地図操作を分離された関数で実行
+        applyPrefectureBoundaryToMap(map.current, boundaryData)
       }
     } catch (error) {
-      console.error('県境データの取得でエラーが発生しました:', error)
+      console.error('県境データ取得エラー:', error)
     }
   }
 
@@ -1444,7 +1058,12 @@ export default function HomePage() {
         : ['restaurant']
       
       // Overpass APIからスポット取得（表示範囲を考慮）
-      const newSpots = await fetchSpotsFromOverpassBounds(bounds, categories)
+      const newSpots = await fetchSpotsFromOverpassBounds({
+        south: sw.lat,
+        west: sw.lng,
+        north: ne.lat,
+        east: ne.lng
+      }, categories)
       
       if (newSpots.length > 0) {
         setSpots(newSpots)
@@ -2445,7 +2064,7 @@ export default function HomePage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
                 </svg>
-                <span>{AREA_OPTIONS.find(area => area.id === selectedAreaId)?.label || 'エリア'}</span>
+                <span>エリア</span>
               </div>
             </button>
 
@@ -2458,12 +2077,7 @@ export default function HomePage() {
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14-7H3m10 14H7"/>
                 </svg>
-                <span>
-                  {selectedCategories.length > 0
-                    ? SPOT_CATEGORIES.find(cat => cat.id === selectedCategories[0])?.label 
-                    : 'カテゴリー'
-                  }
-                </span>
+                <span>カテゴリー</span>
               </div>
             </button>
             
