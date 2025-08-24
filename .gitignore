@@ -44,3 +44,4 @@
 
   # Certificates
   certs/
+node_modules/
