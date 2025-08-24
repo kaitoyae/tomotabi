@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { fetchSpotsFromOverpass, fetchAddressFromNominatim, fetchSpotsFromOverpassBounds, fetchPrefectureBoundaryData, getCacheKey, getCachedSpots, setCachedSpots } from './api'
+// カスタムhooksをインポート
+import { useResponsiveTagScroll, useSheetVisibility, useSearchInput } from './hooks'
 
 // 型定義インポート
 import type { OverpassSpot, RouteSpot, SpotCategory, SearchChip, AreaOption, FilterState, DeviceOrientationEventWithWebkit, PrefectureBoundaryData } from './types'
@@ -136,19 +138,23 @@ export default function HomePage() {
   const [hasUserGesture, setHasUserGesture] = useState<boolean>(false)
   const [shouldInitializeMap, setShouldInitializeMap] = useState<boolean>(false)
   
-  // レスポンシブタグチップ用のstate
-  const [visibleTagCount, setVisibleTagCount] = useState<number>(8) // コンパクトモバイルデフォルト
-  const [canScrollLeft, setCanScrollLeft] = useState<boolean>(false)
-  const [canScrollRight, setCanScrollRight] = useState<boolean>(true)
+  // レスポンシブタグスクロール機能をhookから取得
+  const { visibleTagCount, canScrollLeft, canScrollRight, tagScrollRef, scrollTags } = useResponsiveTagScroll()
   
-  // カテゴリー選択シート用のstate
-  const [showCategorySheet, setShowCategorySheet] = useState<boolean>(false)
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
-  const tagScrollRef = useRef<HTMLDivElement>(null)
+  // シート表示状態管理をhookから取得
+  const {
+    showCategorySheet, areaSheetVisible, showRoutesSheet,
+    openCategorySheet, closeCategorySheet, openAreaSheet, closeAreaSheet, openRoutesSheet, closeRoutesSheet
+  } = useSheetVisibility()
+  
+  // 検索入力状態管理をhookから取得
+  const {
+    searchQuery, selectedCategory, areaSearchQuery,
+    updateSearchQuery, clearSearchQuery, updateSelectedCategory, updateAreaSearchQuery, clearAreaSearchQuery
+  } = useSearchInput()
   
   // 検索関連のstate
   const [searchChips, setSearchChips] = useState<SearchChip[]>([])
-  const [searchQuery, setSearchQuery] = useState<string>('')
   const [filterState, setFilterState] = useState<FilterState>({
     budget: null,
     area: { type: null, value: null },
@@ -157,9 +163,7 @@ export default function HomePage() {
   })
   
   // エリア選択のstate
-  const [areaSheetVisible, setAreaSheetVisible] = useState<boolean>(false)
   const [selectedRegion, setSelectedRegion] = useState<string | null>(null)
-  const [areaSearchQuery, setAreaSearchQuery] = useState<string>('')
   
   // スポット関連のstate
   const [spots, setSpots] = useState<OverpassSpot[]>([])
@@ -173,8 +177,6 @@ export default function HomePage() {
   const [selectedAreaId, setSelectedAreaId] = useState<string>('current')
   const [addedSpotIds, setAddedSpotIds] = useState<Set<string>>(new Set())
   
-  // プラン一覧表示用のstate
-  const [showRoutesSheet, setShowRoutesSheet] = useState<boolean>(false)
   
   const locationRequestRef = useRef<boolean>(false)
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null)
@@ -408,18 +410,13 @@ export default function HomePage() {
     router.push(`/route/${routeId}`)
   }
 
-  // ブラウザ環境チェック関数
-  const isClientSide = () => {
-    return typeof window !== 'undefined'
-  }
-
   const hasDeviceOrientationAPI = () => {
-    return isClientSide() && 'DeviceOrientationEvent' in window
+    return typeof window !== 'undefined' && 'DeviceOrientationEvent' in window
   }
 
   // 検索関連の関数
   const handleSearchInputChange = (value: string) => {
-    setSearchQuery(value)
+    updateSearchQuery(value)
     // 検索バーが空になった場合は県境ハイライトを削除
     if (!value.trim()) {
       clearPrefectureHighlight()
@@ -438,7 +435,7 @@ export default function HomePage() {
     )
     
     setSearchChips(prev => [...prev, ...newChips])
-    setSearchQuery('')
+    clearSearchQuery()
     
   }
 
@@ -476,54 +473,17 @@ export default function HomePage() {
 
 
 
-  // レスポンシブタグチップ関連の関数
-  const updateVisibleTagCount = useCallback(() => {
-    if (!isClientSide()) return
-    
-    const width = window.innerWidth
-    if (width >= 1024) { // PC - コンパクト版で全部表示
-      setVisibleTagCount(16) 
-    } else if (width >= 768) { // タブレット - コンパクトで多め表示
-      setVisibleTagCount(14)
-    } else if (width >= 640) { // 大きめモバイル - コンパクトで効率的
-      setVisibleTagCount(10)
-    } else { // 小さなモバイル - コンパクトでも見やすく
-      setVisibleTagCount(8)
-    }
-  }, [])
-
-  const updateScrollButtons = useCallback(() => {
-    if (!tagScrollRef.current) return
-    
-    const { scrollLeft, scrollWidth, clientWidth } = tagScrollRef.current
-    setCanScrollLeft(scrollLeft > 0)
-    setCanScrollRight(scrollLeft < scrollWidth - clientWidth - 1)
-  }, [])
-
-  const scrollTags = useCallback((direction: 'left' | 'right') => {
-    if (!tagScrollRef.current) return
-    
-    const scrollAmount = isClientSide() && window.innerWidth >= 768 ? 200 : 120
-    const targetScroll = direction === 'left' 
-      ? tagScrollRef.current.scrollLeft - scrollAmount
-      : tagScrollRef.current.scrollLeft + scrollAmount
-    
-    tagScrollRef.current.scrollTo({
-      left: targetScroll,
-      behavior: 'smooth'
-    })
-  }, [])
 
   // エリア選択関連の関数
   const handleAreaButtonClick = () => {
-    setAreaSheetVisible(true)
+    openAreaSheet()
     setSelectedRegion(null)
-    setAreaSearchQuery('')
+    clearAreaSearchQuery()
   }
   
   const handleAreaSelect = (areaId: string) => {
     setSelectedAreaId(areaId)
-    setAreaSheetVisible(false)
+    closeAreaSheet()
   }
 
   const handleRegionSelect = (regionId: string) => {
@@ -532,7 +492,7 @@ export default function HomePage() {
 
   const handlePrefectureSelect = async (prefecture: string) => {
     // ホーム画面の検索バーに県名を入力
-    setSearchQuery(prefecture)
+    updateSearchQuery(prefecture)
     
     // エリアチップを追加
     const chip: SearchChip = {
@@ -551,32 +511,32 @@ export default function HomePage() {
     }
     
     // エリアシートを閉じる
-    setAreaSheetVisible(false)
+    closeAreaSheet()
     setSelectedRegion(null)
-    setAreaSearchQuery('')
+    clearAreaSearchQuery()
   }
 
   // カテゴリー選択関連の関数
   const handleCategoryButtonClick = () => {
-    setShowCategorySheet(true)
+    openCategorySheet()
   }
 
   const handleCategorySelect = (categoryId: string) => {
     const category = SPOT_CATEGORIES.find(cat => cat.id === categoryId)
     if (category) {
       // 検索バーにカテゴリ名を入力
-      setSearchQuery(category.label)
+      updateSearchQuery(category.label)
       
       // 単一選択に変更
       setSelectedCategories([categoryId])
       
       // シートを閉じる
-      setShowCategorySheet(false)
+      closeCategorySheet()
     }
   }
 
   const handleCategoryToggle = (category: string) => {
-    setSearchQuery(category)
+    updateSearchQuery(category)
     
     // カテゴリーチップを追加
     const chip: SearchChip = {
@@ -587,8 +547,8 @@ export default function HomePage() {
     }
     addSearchChip(chip)
     
-    setShowCategorySheet(false)
-    setSelectedCategory(null)
+    closeCategorySheet()
+    updateSelectedCategory(null)
   }
 
   // GeoJSONからBounding Boxを計算する関数
@@ -1653,40 +1613,6 @@ export default function HomePage() {
 
 
 
-  // レスポンシブタグチップの初期化とリサイズ対応
-  useEffect(() => {
-    if (!isClientSide()) return
-
-    // 初期設定
-    updateVisibleTagCount()
-    
-    const handleResize = () => {
-      updateVisibleTagCount()
-      setTimeout(updateScrollButtons, 100) // DOM更新後にスクロール状態チェック
-    }
-
-    const handleScroll = () => {
-      updateScrollButtons()
-    }
-
-    // リサイズイベント
-    window.addEventListener('resize', handleResize)
-    
-    // スクロールイベント
-    if (tagScrollRef.current) {
-      tagScrollRef.current.addEventListener('scroll', handleScroll, { passive: true })
-    }
-
-    // 初期スクロール状態チェック
-    setTimeout(updateScrollButtons, 100)
-
-    return () => {
-      window.removeEventListener('resize', handleResize)
-      if (tagScrollRef.current) {
-        tagScrollRef.current.removeEventListener('scroll', handleScroll)
-      }
-    }
-  }, [updateVisibleTagCount, updateScrollButtons])
 
   // 地図範囲内のプランを取得（ズームレベル対応）
 
@@ -1900,7 +1826,7 @@ export default function HomePage() {
             
             {/* プランボタン */}
             <button
-              onClick={() => setShowRoutesSheet(true)}
+              onClick={openRoutesSheet}
               className="flex-1 px-4 py-2 mx-1 rounded-lg text-sm font-medium border-2 transition-all duration-150 hover:scale-105 active:scale-95 bg-white text-gray-700 border-gray-300 hover:border-teal-400 hover:text-teal-600"
             >
               <div className="flex items-center justify-center space-x-2">
@@ -1946,7 +1872,7 @@ export default function HomePage() {
             
             {/* プランボタン - モバイル1行 */}
             <button
-              onClick={() => setShowRoutesSheet(true)}
+              onClick={openRoutesSheet}
               className="flex-1 px-2 py-1.5 mx-0.5 rounded text-xs font-medium border transition-all duration-150 active:scale-95 bg-white text-gray-700 border-gray-300 active:border-teal-400 active:text-teal-600 active:bg-teal-50"
             >
               <div className="flex items-center justify-center space-x-1.5">
@@ -2090,7 +2016,7 @@ export default function HomePage() {
             {/* 背景オーバーレイ */}
             <div 
               className="fixed inset-0 bg-black bg-opacity-50 z-50"
-              onClick={() => setShowRoutesSheet(false)}
+              onClick={closeRoutesSheet}
             />
             
           {/* シート本体 */}
@@ -2106,7 +2032,7 @@ export default function HomePage() {
                 おすすめルート ({visibleRoutes.length}件)
               </h2>
               <button
-                onClick={() => setShowRoutesSheet(false)}
+                onClick={closeRoutesSheet}
                 className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center"
               >
                 <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2150,7 +2076,7 @@ export default function HomePage() {
                     key={route.id}
                     onClick={() => {
                       onSelectRoute(route.id)
-                      setShowRoutesSheet(false)
+                      closeRoutesSheet()
                     }}
                     className="w-full bg-gray-50 rounded-lg p-4 text-left hover:bg-gray-100 transition-colors"
                     aria-label={`${route.title}を選択`}
@@ -2202,7 +2128,7 @@ export default function HomePage() {
           {/* 背景オーバーレイ */}
           <div 
             className="fixed inset-0 bg-black bg-opacity-50 z-50"
-            onClick={() => setAreaSheetVisible(false)}
+            onClick={closeAreaSheet}
           />
           
           {/* スライドシート */}
@@ -2219,7 +2145,7 @@ export default function HomePage() {
                   エリアを選択
                 </h2>
                 <button
-                  onClick={() => setAreaSheetVisible(false)}
+                  onClick={closeAreaSheet}
                   className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center"
                 >
                   <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2288,7 +2214,7 @@ export default function HomePage() {
           {/* オーバーレイ */}
           <div 
             className="fixed inset-0 bg-black bg-opacity-50 z-40"
-            onClick={() => setShowCategorySheet(false)}
+            onClick={closeCategorySheet}
           />
           
           {/* シート本体 */}
@@ -2297,7 +2223,7 @@ export default function HomePage() {
             <div className="flex items-center justify-between p-4 border-b border-gray-200">
               <h2 className="text-lg font-semibold text-gray-800">カテゴリー選択</h2>
               <button
-                onClick={() => setShowCategorySheet(false)}
+                onClick={closeCategorySheet}
                 className="p-2 -mr-2 text-gray-400 hover:text-gray-600 transition-colors"
                 aria-label="閉じる"
               >
