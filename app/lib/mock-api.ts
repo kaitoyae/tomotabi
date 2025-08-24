@@ -6,7 +6,7 @@ export type Spot = {
   lng: number
   photo?: string
   comment?: string
-  isAccommodation?: boolean // 宿泊施設フラグ
+  isLodging?: boolean // 宿泊施設フラグ
 }
 
 export type SegmentMode = 'walking' | 'driving' | 'transit'
@@ -219,7 +219,7 @@ const parseCSVRoutes = async (): Promise<Route[]> => {
         lng: parseFloat(row.spot_lng) || 139.7671,
         photo: row.spot_photo || undefined,
         comment: row.spot_comment || undefined,
-        isAccommodation: row.spot_is_accommodation.toLowerCase() === 'true'
+        isLodging: row.spot_is_accommodation.toLowerCase() === 'true'
       }))
       
       // dayBreaksの処理

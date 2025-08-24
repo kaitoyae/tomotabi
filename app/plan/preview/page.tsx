@@ -13,7 +13,7 @@ type Spot = {
   photo?: string
   comment?: string
   stayTime: number // 滞在時間（分）
-  isAccommodation?: boolean // 宿泊施設フラグ
+  isLodging?: boolean // 宿泊施設フラグ
 }
 
 type FormData = {
@@ -473,7 +473,7 @@ export default function PlanPreviewPage() {
                         <div className="flex-1">
                           <div className="flex items-center flex-wrap gap-2">
                             <h4 className="font-semibold">{spot.name}</h4>
-                            {spot.isAccommodation && (
+                            {spot.isLodging && (
                               <div className="flex items-center px-2 py-0.5 bg-blue-50 rounded-full">
                                 <AccommodationIcon className="w-3 h-3 mr-1 text-blue-600" />
                                 <span className="text-[11px] text-blue-600">宿泊</span>
@@ -490,7 +490,7 @@ export default function PlanPreviewPage() {
                               </span>
                             )}
                           </div>
-                          {!spot.isAccommodation && (
+                          {!spot.isLodging && (
                             <p className="text-sm text-gray-500 mt-1">滞在時間: {spot.stayTime}分</p>
                           )}
                           {spot.comment && (
