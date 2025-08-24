@@ -6,7 +6,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { fetchAddressFromNominatim, fetchPrefectureBoundaryData } from './api'
 // カスタムhooksをインポート
-import { useResponsiveTagScroll, useSheetVisibility, useSearchInput, useLocationState, useSpotState, useSpotBusinessLogic, useCategoryAreaState, useCategoryAreaBusinessLogic, useSpotFetching, useUIWrapperFunctions } from './hooks'
+import { useResponsiveTagScroll, useSheetVisibility, useSearchInput, useLocationState, useSpotState, useSpotBusinessLogic, useCategoryAreaState, useCategoryAreaBusinessLogic, useSpotFetching, useUIWrapperFunctions, useApiController } from './hooks'
 
 // 型定義インポート
 import type { OverpassSpot, RouteSpot, SpotCategory, SearchChip, AreaOption, FilterState, DeviceOrientationEventWithWebkit, PrefectureBoundaryData } from './types'
@@ -300,14 +300,28 @@ export default function HomePage() {
   } = useUIWrapperFunctions(uiWrapperDependencies)
   
   
-  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null)
-  const [isMapMoving, setIsMapMoving] = useState<boolean>(false)
-  const mapMoveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  
-  // 🚨 グローバルAPI制御（同時呼び出し完全防止）
-  const isApiCallInProgress = useRef<boolean>(false)
-  const apiCallQueue = useRef<Array<() => Promise<void>>>([])
-  const lastApiCallTime = useRef<number>(0)
+  // Phase 2: API制御システム（Step 3: isMapMoving状態追加）
+  const {
+    isApiCallInProgress,
+    apiCallQueue,
+    lastApiCallTime,
+    debounceTimerRef,
+    mapMoveTimeoutRef,
+    isMapMoving,
+    setIsMapMoving,
+    getIsApiCallInProgress,
+    getApiCallQueueLength,
+    getLastApiCallTime,
+    setApiCallInProgress,
+    pushToApiCallQueue,
+    shiftFromApiCallQueue,
+    clearApiCallQueue,
+    updateLastApiCallTime,
+    clearDebounceTimer,
+    setDebounceTimer,
+    clearMapMoveTimer,
+    setMapMoveTimer
+  } = useApiController()
 
   // 🛡️ 安全なAPI呼び出し管理システム（レート制限完全回避）
   const safeApiCall = useCallback(async (apiFunction: () => Promise<void>, description: string) => {

@@ -1024,6 +1024,109 @@ export const useUIWrapperFunctions = (dependencies: {
   }
 }
 
+// Phase 2: API制御システムのカスタムhook（Step 3: isMapMoving状態追加）
+export const useApiController = () => {
+  // 🚨 グローバルAPI制御（同時呼び出し完全防止）
+  const isApiCallInProgress = useRef<boolean>(false)
+  const apiCallQueue = useRef<Array<() => Promise<void>>>([])
+  const lastApiCallTime = useRef<number>(0)
+  
+  // デバウンス制御（Step 2で追加）
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const mapMoveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  
+  // 地図移動状態（Step 3で追加）
+  const [isMapMoving, setIsMapMoving] = useState<boolean>(false)
+  
+  // アクセサ関数（読み取り専用）
+  const getIsApiCallInProgress = useCallback(() => {
+    return isApiCallInProgress.current
+  }, [])
+  
+  const getApiCallQueueLength = useCallback(() => {
+    return apiCallQueue.current.length
+  }, [])
+  
+  // ミューテーター関数（既存コードからの操作用）
+  const setApiCallInProgress = useCallback((value: boolean) => {
+    isApiCallInProgress.current = value
+  }, [])
+  
+  const pushToApiCallQueue = useCallback((fn: () => Promise<void>) => {
+    apiCallQueue.current.push(fn)
+  }, [])
+  
+  const shiftFromApiCallQueue = useCallback(() => {
+    return apiCallQueue.current.shift()
+  }, [])
+  
+  const clearApiCallQueue = useCallback(() => {
+    apiCallQueue.current = []
+  }, [])
+  
+  const updateLastApiCallTime = useCallback((time: number) => {
+    lastApiCallTime.current = time
+  }, [])
+  
+  const getLastApiCallTime = useCallback(() => {
+    return lastApiCallTime.current
+  }, [])
+  
+  // デバウンス制御のアクセサ・ミューテーター関数
+  const clearDebounceTimer = useCallback(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = null
+    }
+  }, [])
+  
+  const setDebounceTimer = useCallback((timeout: NodeJS.Timeout) => {
+    debounceTimerRef.current = timeout
+  }, [])
+  
+  const clearMapMoveTimer = useCallback(() => {
+    if (mapMoveTimeoutRef.current) {
+      clearTimeout(mapMoveTimeoutRef.current)
+      mapMoveTimeoutRef.current = null
+    }
+  }, [])
+  
+  const setMapMoveTimer = useCallback((timeout: NodeJS.Timeout) => {
+    mapMoveTimeoutRef.current = timeout
+  }, [])
+  
+  return {
+    // Ref references (既存コードとの互換性のため)
+    isApiCallInProgress,
+    apiCallQueue,
+    lastApiCallTime,
+    debounceTimerRef,
+    mapMoveTimeoutRef,
+    
+    // State values (地図移動状態)
+    isMapMoving,
+    setIsMapMoving,
+    
+    // アクセサ関数
+    getIsApiCallInProgress,
+    getApiCallQueueLength,
+    getLastApiCallTime,
+    
+    // ミューテーター関数
+    setApiCallInProgress,
+    pushToApiCallQueue,
+    shiftFromApiCallQueue,
+    clearApiCallQueue,
+    updateLastApiCallTime,
+    
+    // デバウンス制御関数
+    clearDebounceTimer,
+    setDebounceTimer,
+    clearMapMoveTimer,
+    setMapMoveTimer
+  }
+}
+
 export const usePlaceholder = () => {
   // 段階2で実際のhooksに置き換えられます
   return {}
