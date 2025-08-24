@@ -4,9 +4,9 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { fetchSpotsFromOverpass, fetchAddressFromNominatim, fetchSpotsFromOverpassBounds, fetchPrefectureBoundaryData, getCacheKey, getCachedSpots, setCachedSpots } from './api'
+import { fetchAddressFromNominatim, fetchPrefectureBoundaryData } from './api'
 // カスタムhooksをインポート
-import { useResponsiveTagScroll, useSheetVisibility, useSearchInput } from './hooks'
+import { useResponsiveTagScroll, useSheetVisibility, useSearchInput, useLocationState, useSpotState, useSpotBusinessLogic, useCategoryAreaState, useCategoryAreaBusinessLogic, useSpotFetching, useUIWrapperFunctions } from './hooks'
 
 // 型定義インポート
 import type { OverpassSpot, RouteSpot, SpotCategory, SearchChip, AreaOption, FilterState, DeviceOrientationEventWithWebkit, PrefectureBoundaryData } from './types'
@@ -128,18 +128,21 @@ export default function HomePage() {
   const spotMarkers = useRef<maplibregl.Marker[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [mapLoaded, setMapLoaded] = useState<boolean>(false) // 地図ロード完了状態
   // swipeStateは削除
-  const [currentLocation, setCurrentLocation] = useState<[number, number] | null>(null)
-  const [watchId, setWatchId] = useState<number | null>(null)
-  const [deviceHeading, setDeviceHeading] = useState<number>(0)
-  const [locationAccuracy, setLocationAccuracy] = useState<number>(0)
-  const [orientationPermissionNeeded, setOrientationPermissionNeeded] = useState<boolean>(false)
-  const [locationRequestInProgress, setLocationRequestInProgress] = useState<boolean>(false)
-  const [hasUserGesture, setHasUserGesture] = useState<boolean>(false)
   const [shouldInitializeMap, setShouldInitializeMap] = useState<boolean>(false)
   
   // レスポンシブタグスクロール機能をhookから取得
   const { visibleTagCount, canScrollLeft, canScrollRight, tagScrollRef, scrollTags } = useResponsiveTagScroll()
+  
+  // 位置情報基本状態管理をhookから取得
+  const {
+    currentLocation, watchId, deviceHeading, locationAccuracy,
+    orientationPermissionNeeded, locationRequestInProgress, hasUserGesture,
+    updateCurrentLocation, updateLocationAccuracy, updateDeviceHeading, updateWatchId,
+    updateOrientationPermissionNeeded, updateLocationRequestInProgress, updateHasUserGesture,
+    startLocationWatch, requestLocationPermission
+  } = useLocationState()
   
   // シート表示状態管理をhookから取得
   const {
@@ -153,7 +156,35 @@ export default function HomePage() {
     updateSearchQuery, clearSearchQuery, updateSelectedCategory, updateAreaSearchQuery, clearAreaSearchQuery
   } = useSearchInput()
   
-  // 検索関連のstate
+  
+  // スポット管理基本状態をhookから取得
+  const spotState = useSpotState()
+  const {
+    spots, selectedSpot, routeSpots, spotsLoading, addedSpotIds,
+    updateSpots, updateSelectedSpot, updateRouteSpots, addToRouteSpots, updateSpotsLoading,
+    updateAddedSpotIds, addSpotId, removeSpotId
+  } = spotState
+  
+  // スポットビジネスロジック（地図非依存）をhookから取得
+  const { handleSpotClick, addSpotToRoute } = useSpotBusinessLogic(spotState)
+  
+  // カテゴリー・エリア選択状態をhookから取得
+  const categoryAreaState = useCategoryAreaState()
+  const {
+    selectedCategories, selectedAreaId, selectedRegion,
+    updateSelectedCategories, updateSelectedAreaId, updateSelectedRegion
+  } = categoryAreaState
+  
+  // カテゴリー・エリア選択ビジネスロジック（純粋関数）をhookから取得
+  const {
+    selectCategory, selectArea, selectRegion, selectPrefecture, prepareAreaSelection
+  } = useCategoryAreaBusinessLogic(categoryAreaState)
+  
+  // スポット取得の純粋APIロジック（地図・UI非依存）をhookから取得
+  const { fetchSpotsData, fetchSpotsDataForBounds } = useSpotFetching()
+  
+  // 残りのstate（後続Phase移行対象外）
+  const [spotInfoCardVisible, setSpotInfoCardVisible] = useState<boolean>(false)
   const [searchChips, setSearchChips] = useState<SearchChip[]>([])
   const [filterState, setFilterState] = useState<FilterState>({
     budget: null,
@@ -162,118 +193,216 @@ export default function HomePage() {
     customBudget: null
   })
   
-  // エリア選択のstate
-  const [selectedRegion, setSelectedRegion] = useState<string | null>(null)
-  
-  // スポット関連のstate
-  const [spots, setSpots] = useState<OverpassSpot[]>([])
-  const [selectedSpot, setSelectedSpot] = useState<OverpassSpot | null>(null)
-  const [routeSpots, setRouteSpots] = useState<RouteSpot[]>([])
-  const [spotsLoading, setSpotsLoading] = useState<boolean>(false)
-  const [spotInfoCardVisible, setSpotInfoCardVisible] = useState<boolean>(false)
-  
-  // カテゴリーとエリアのstate
-  const [selectedCategories, setSelectedCategories] = useState<string[]>(['restaurant'])
-  const [selectedAreaId, setSelectedAreaId] = useState<string>('current')
-  const [addedSpotIds, setAddedSpotIds] = useState<Set<string>>(new Set())
-  
-  
-  const locationRequestRef = useRef<boolean>(false)
-  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null)
+  // 地図と県境関連の関数（Phase 3移行対象）
+  // 県境ハイライトを削除する関数
+  const clearPrefectureHighlight = () => {
+    if (!map.current) return
+    
+    try {
+      if (map.current.getLayer('prefecture-fill')) {
+        map.current.removeLayer('prefecture-fill')
+      }
+      if (map.current.getLayer('prefecture-outline')) {
+        map.current.removeLayer('prefecture-outline')
+      }
+      if (map.current.getSource('prefecture-boundary')) {
+        map.current.removeSource('prefecture-boundary')
+      }
+    } catch (error) {
+      // レイヤーが存在しない場合のエラーを無視
+    }
+  }
 
-  // コールバック関数
+  // 県境データを取得してハイライト表示する関数
+  const fetchAndShowPrefectureBoundary = async (prefecture: string) => {
+    if (!map.current) return
+    
+    try {
+      // 純粋API関数を呼び出して県境界データを取得
+      const boundaryData = await fetchPrefectureBoundaryData(prefecture)
+      
+      if (boundaryData) {
+        // 地図操作を分離された関数で実行
+        applyPrefectureBoundaryToMap(map.current, boundaryData)
+      }
+    } catch (error) {
+      console.error('県境データ取得エラー:', error)
+    }
+  }
+
+  // UI統合ラッパー関数（Phase 1で移行）
+  const uiWrapperDependencies = {
+    // スポット関連依存
+    handleSpotClick,
+    addSpotToRoute,
+    setSpotInfoCardVisible,
+    updateSelectedSpot,
+    
+    // カテゴリー・エリア選択依存
+    prepareAreaSelection,
+    selectArea,
+    selectRegion,
+    selectPrefecture,
+    selectCategory,
+    
+    // UI状態管理依存
+    openAreaSheet,
+    closeAreaSheet,
+    openCategorySheet,
+    closeCategorySheet,
+    clearAreaSearchQuery,
+    
+    // 検索関連依存
+    updateSearchQuery,
+    clearSearchQuery,
+    updateSelectedCategory,
+    clearPrefectureHighlight,
+    
+    // その他依存
+    router,
+    searchQuery,
+    parseNaturalText,
+    searchChips,
+    setSearchChips,
+    addSearchChip: (chip: SearchChip) => {
+      // 重複チェック
+      const isDuplicate = searchChips.some(existing => existing.id === chip.id)
+      if (isDuplicate) return
+      
+      // タグの場合は最大3つまで
+      if (chip.type === 'tag') {
+        const currentTags = searchChips.filter(c => c.type === 'tag')
+        if (currentTags.length >= 3) return
+      }
+      
+      const newChips = [...searchChips, chip]
+      setSearchChips(newChips)
+    },
+    SPOT_CATEGORIES,
+    fetchAndShowPrefectureBoundary
+  }
+
+  const {
+    handleSpotClickWithUI,
+    addSpotToRouteWithUI,
+    onCreateRoute,
+    onProfile,
+    onSelectRoute,
+    handleSearchInputChange,
+    handleSearchSubmit,
+    handleAreaButtonClick,
+    handleAreaSelect,
+    handleRegionSelect,
+    handlePrefectureSelect,
+    handleCategoryButtonClick,
+    handleCategorySelect,
+    handleCategoryToggle
+  } = useUIWrapperFunctions(uiWrapperDependencies)
   
-  // スポット取得関数（キャッシュ対応）
-  const loadSpots = useCallback(async () => {
-    console.log('🔍 スポット取得開始:', {
-      hasCurrentLocation: !!currentLocation,
-      selectedAreaId,
-      selectedCategories: selectedCategories.length
+  
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const [isMapMoving, setIsMapMoving] = useState<boolean>(false)
+  const mapMoveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  
+  // 🚨 グローバルAPI制御（同時呼び出し完全防止）
+  const isApiCallInProgress = useRef<boolean>(false)
+  const apiCallQueue = useRef<Array<() => Promise<void>>>([])
+  const lastApiCallTime = useRef<number>(0)
+
+  // 🛡️ 安全なAPI呼び出し管理システム（レート制限完全回避）
+  const safeApiCall = useCallback(async (apiFunction: () => Promise<void>, description: string) => {
+    const now = Date.now()
+    const timeSinceLastCall = now - lastApiCallTime.current
+    const MIN_INTERVAL = 10000 // 10秒間隔
+    
+    console.log(`🛡️ 安全なAPI呼び出し管理: ${description}`, {
+      isApiCallInProgress: isApiCallInProgress.current,
+      timeSinceLastCall,
+      minInterval: MIN_INTERVAL,
+      queueLength: apiCallQueue.current.length
     })
     
-    if (!currentLocation && selectedAreaId === 'current') {
-      console.log('⏳ 現在地未取得のため取得をスキップ')
+    // 既にAPI呼び出し中の場合はキューに追加
+    if (isApiCallInProgress.current) {
+      console.log(`⏳ API呼び出し中のため${description}をキューに追加`)
+      apiCallQueue.current.push(async () => {
+        await safeApiCall(apiFunction, `キューから実行: ${description}`)
+      })
       return
     }
     
-    setSpotsLoading(true)
-    try {
-      let centerLat: number, centerLng: number, radius: number
-      
-      if (selectedAreaId === 'current' && currentLocation) {
-        [centerLng, centerLat] = currentLocation
-        radius = 2
-        console.log('📍 現在地中心でスポット検索:', { centerLat, centerLng, radius })
-      } else {
-        const areaOption = AREA_OPTIONS.find(area => area.id === selectedAreaId)
-        if (!areaOption) {
-          console.log('⚠️ エリアオプションが見つかりません:', selectedAreaId)
-          return
-        }
-        centerLat = areaOption.lat
-        centerLng = areaOption.lng
-        radius = areaOption.radius
-        console.log('🏙️ エリア指定でスポット検索:', { area: areaOption.label, centerLat, centerLng, radius })
-      }
-      
-      // キャッシュキーを生成
-      const cacheKey = getCacheKey(centerLat, centerLng, radius, selectedCategories)
-      console.log('🗂️ キャッシュキー:', cacheKey)
-      
-      // キャッシュから取得を試行
-      const cachedSpots = getCachedSpots(cacheKey)
-      if (cachedSpots) {
-        console.log('💾 キャッシュからスポットを取得:', cachedSpots.length, '件')
-        setSpots(cachedSpots)
-        setSpotsLoading(false)
-        return
-      }
-      
-      // キャッシュにない場合はAPIから取得
-      console.log('🌐 Overpass APIからスポットを取得中:', { centerLat, centerLng, radius, categories: selectedCategories })
-      const fetchedSpots = await fetchSpotsFromOverpass(
-        centerLat, 
-        centerLng, 
-        radius, 
-        selectedCategories
-      )
-      console.log('✅ Overpass APIから取得完了:', fetchedSpots.length, '件')
-      
-      // 取得したスポットの詳細ログ
-      if (fetchedSpots.length > 0) {
-        console.log('📍 取得スポット例:', fetchedSpots.slice(0, 3).map(spot => ({
-          name: spot.name,
-          type: spot.type,
-          lat: spot.lat,
-          lng: spot.lng
-        })))
-      }
-      
-      // キャッシュに保存
-      setCachedSpots(cacheKey, fetchedSpots)
-      
-      setSpots(fetchedSpots)
-      
-    } catch (error) {
-      console.error('❌ スポット取得エラー:', error)
-      setError('スポットの取得に失敗しました')
-    } finally {
-      setSpotsLoading(false)
-    }
-  }, [currentLocation, selectedAreaId, selectedCategories])
-
-  // スポットクリック処理
-  const handleSpotClick = useCallback(async (spot: OverpassSpot) => {
-    // 住所が不完全な場合はNominatim APIで補完
-    if (!spot.address) {
-      const address = await fetchAddressFromNominatim(spot.lat, spot.lng)
-      spot.address = address
+    // 最後のAPI呼び出しから間隔が短い場合は待機
+    if (timeSinceLastCall < MIN_INTERVAL) {
+      const waitTime = MIN_INTERVAL - timeSinceLastCall
+      console.log(`⏰ ${description}: ${waitTime}ms待機してからAPI呼び出し`)
+      setTimeout(async () => {
+        await safeApiCall(apiFunction, `遅延実行: ${description}`)
+      }, waitTime)
+      return
     }
     
-    setSelectedSpot(spot)
-    setSpotInfoCardVisible(true)
+    // 安全にAPI呼び出し実行
+    isApiCallInProgress.current = true
+    lastApiCallTime.current = now
+    
+    try {
+      console.log(`🚀 ${description}: API呼び出し開始`)
+      await apiFunction()
+      console.log(`✅ ${description}: API呼び出し完了`)
+    } catch (error) {
+      console.error(`❌ ${description}: API呼び出しエラー:`, error)
+    } finally {
+      isApiCallInProgress.current = false
+      
+      // キューに次の呼び出しがある場合は処理
+      if (apiCallQueue.current.length > 0) {
+        const nextCall = apiCallQueue.current.shift()
+        if (nextCall) {
+          console.log(`🔄 キューから次のAPI呼び出し実行`)
+          setTimeout(nextCall, 2000) // 2秒待機してから次を実行
+        }
+      }
+    }
   }, [])
+
+  // コールバック関数
   
+  // スポット取得wrapper関数（UI統合版・安全制御）
+  const loadSpots = useCallback(async () => {
+    await safeApiCall(async () => {
+      updateSpotsLoading(true)
+      
+      try {
+        // 純粋なAPIロジックを実行（hooks経由）
+        const result = await fetchSpotsData(categoryAreaState, currentLocation)
+        
+        // 結果に基づいてUI状態を更新
+        if (result.shouldSkip) {
+          updateSpotsLoading(false)
+          return
+        }
+        
+        if (result.error) {
+          setError(result.error)
+          updateSpotsLoading(false)
+          return
+        }
+        
+        if (result.spots) {
+          updateSpots(result.spots)
+          console.log(`✅ 現在地スポット取得完了: ${result.spots.length} 件`)
+        }
+        
+      } catch (error) {
+        console.error('❌ 現在地スポット取得wrapper エラー:', error)
+        setError('スポットの取得に失敗しました')
+      } finally {
+        updateSpotsLoading(false)
+      }
+    }, '現在地ベーススポット取得')
+  }, [safeApiCall, fetchSpotsData, categoryAreaState, currentLocation, updateSpotsLoading, updateSpots, setError])
+
+  // スポットクリック処理
   // マーカー更新関数
   const updateSpotMarkers = useCallback((spotsData: OverpassSpot[]) => {
     console.log('🗺️ スポットマーカー更新開始:', { 
@@ -380,80 +509,14 @@ export default function HomePage() {
     }
   }, [addedSpotIds, handleSpotClick])
   
-  // スポットをルートに追加
-  const addSpotToRoute = useCallback((spot: OverpassSpot, stayTime: number = 60) => {
-    const routeSpot: RouteSpot = {
-      id: spot.id,
-      name: spot.name,
-      lat: spot.lat,
-      lng: spot.lng,
-      address: spot.address,
-      stayTime,
-      addedAt: new Date()
-    }
-    
-    setRouteSpots(prev => [...prev, routeSpot])
-    setAddedSpotIds(prev => new Set(Array.from(prev).concat(spot.id)))
-    setSpotInfoCardVisible(false)
-    setSelectedSpot(null)
-  }, [])
-
-  const onCreateRoute = () => {
-    router.push('/plan/create')
-  }
-
-  const onProfile = () => {
-    router.push('/profile')
-  }
-  
-  const onSelectRoute = (routeId: string) => {
-    router.push(`/route/${routeId}`)
-  }
+  // ナビゲーション関数群とUI統合ラッパーは useUIWrapperFunctions hook に移行済み
 
   const hasDeviceOrientationAPI = () => {
     return typeof window !== 'undefined' && 'DeviceOrientationEvent' in window
   }
 
-  // 検索関連の関数
-  const handleSearchInputChange = (value: string) => {
-    updateSearchQuery(value)
-    // 検索バーが空になった場合は県境ハイライトを削除
-    if (!value.trim()) {
-      clearPrefectureHighlight()
-    }
-  }
-
-  const handleSearchSubmit = () => {
-    if (!searchQuery.trim()) return
-    
-    // 自然文パースでチップ化
-    const parsedChips = parseNaturalText(searchQuery.trim())
-    
-    // 既存のチップと重複しないように追加
-    const newChips = parsedChips.filter(chip => 
-      !searchChips.some(existing => existing.id === chip.id)
-    )
-    
-    setSearchChips(prev => [...prev, ...newChips])
-    clearSearchQuery()
-    
-  }
-
-  const addSearchChip = (chip: SearchChip) => {
-    // 重複チェック
-    const isDuplicate = searchChips.some(existing => existing.id === chip.id)
-    if (isDuplicate) return
-    
-    // タグの場合は最大3つまで
-    if (chip.type === 'tag') {
-      const currentTags = searchChips.filter(c => c.type === 'tag')
-      if (currentTags.length >= 3) return
-    }
-    
-    const newChips = [...searchChips, chip]
-    setSearchChips(newChips)
-  }
-
+  // 検索関連の関数群は useUIWrapperFunctions hook に移行済み
+  
   const removeSearchChip = (chipId: string) => {
     const newChips = searchChips.filter(chip => chip.id !== chipId)
     setSearchChips(newChips)
@@ -474,82 +537,7 @@ export default function HomePage() {
 
 
 
-  // エリア選択関連の関数
-  const handleAreaButtonClick = () => {
-    openAreaSheet()
-    setSelectedRegion(null)
-    clearAreaSearchQuery()
-  }
-  
-  const handleAreaSelect = (areaId: string) => {
-    setSelectedAreaId(areaId)
-    closeAreaSheet()
-  }
-
-  const handleRegionSelect = (regionId: string) => {
-    setSelectedRegion(regionId)
-  }
-
-  const handlePrefectureSelect = async (prefecture: string) => {
-    // ホーム画面の検索バーに県名を入力
-    updateSearchQuery(prefecture)
-    
-    // エリアチップを追加
-    const chip: SearchChip = {
-      id: `area-${prefecture}`,
-      type: 'area',
-      label: prefecture,
-      value: prefecture
-    }
-    addSearchChip(chip)
-    
-    try {
-      // 県境データを取得してハイライト表示
-      await fetchAndShowPrefectureBoundary(prefecture)
-    } catch (error) {
-      console.error('エリア検索でエラーが発生しました:', error)
-    }
-    
-    // エリアシートを閉じる
-    closeAreaSheet()
-    setSelectedRegion(null)
-    clearAreaSearchQuery()
-  }
-
-  // カテゴリー選択関連の関数
-  const handleCategoryButtonClick = () => {
-    openCategorySheet()
-  }
-
-  const handleCategorySelect = (categoryId: string) => {
-    const category = SPOT_CATEGORIES.find(cat => cat.id === categoryId)
-    if (category) {
-      // 検索バーにカテゴリ名を入力
-      updateSearchQuery(category.label)
-      
-      // 単一選択に変更
-      setSelectedCategories([categoryId])
-      
-      // シートを閉じる
-      closeCategorySheet()
-    }
-  }
-
-  const handleCategoryToggle = (category: string) => {
-    updateSearchQuery(category)
-    
-    // カテゴリーチップを追加
-    const chip: SearchChip = {
-      id: `tag-${category}`,
-      type: 'tag',
-      label: category,
-      value: category
-    }
-    addSearchChip(chip)
-    
-    closeCategorySheet()
-    updateSelectedCategory(null)
-  }
+  // カテゴリー・エリア選択の関数群は useUIWrapperFunctions hook に移行済み
 
   // GeoJSONからBounding Boxを計算する関数
   // 県境界データを地図に適用するヘルパー関数
@@ -618,41 +606,9 @@ export default function HomePage() {
   }
 
   // calculateBBox関数は api.ts に移行済み
-  // 県境データを取得してハイライト表示する関数
-  const fetchAndShowPrefectureBoundary = async (prefecture: string) => {
-    if (!map.current) return
-    
-    try {
-      // 純粋API関数を呼び出して県境界データを取得
-      const boundaryData = await fetchPrefectureBoundaryData(prefecture)
-      
-      if (boundaryData) {
-        // 地図操作を分離された関数で実行
-        applyPrefectureBoundaryToMap(map.current, boundaryData)
-      }
-    } catch (error) {
-      console.error('県境データ取得エラー:', error)
-    }
-  }
+  // fetchAndShowPrefectureBoundary関数は上部に移行済み
 
-  // 県境ハイライトを削除する関数
-  const clearPrefectureHighlight = () => {
-    if (!map.current) return
-    
-    try {
-      if (map.current.getLayer('prefecture-fill')) {
-        map.current.removeLayer('prefecture-fill')
-      }
-      if (map.current.getLayer('prefecture-outline')) {
-        map.current.removeLayer('prefecture-outline')
-      }
-      if (map.current.getSource('prefecture-boundary')) {
-        map.current.removeSource('prefecture-boundary')
-      }
-    } catch (error) {
-      // レイヤーが存在しない場合のエラーを無視
-    }
-  }
+  // clearPrefectureHighlight関数は上部に移行済み
 
   // Google Map風の現在地マーカーを作成
   const createCurrentLocationMarker = () => {
@@ -760,102 +716,109 @@ export default function HomePage() {
     return el
   }
 
-  // 位置情報の継続監視
-  const startLocationWatch = useCallback(() => {
-    if (watchId) {
-      console.log('📍 既に監視中のためスキップ')
+  
+  // 地図の表示範囲に基づいてスポットを取得するwrapper関数（安全制御版）
+  const loadSpotsForMapBounds = useCallback(async () => {
+    console.log('🎯 loadSpotsForMapBounds 実行開始', {
+      hasMap: !!map.current,
+      mapLoaded: map.current?.loaded(),
+      selectedCategories: selectedCategories.length
+    })
+    
+    if (!map.current) {
+      console.log('⚠️ loadSpotsForMapBounds: 地図が未初期化のため終了')
       return
     }
     
-    console.log('📍 位置情報継続監視開始')
-    const newWatchId = navigator.geolocation.watchPosition(
-      (position) => {
-        const { latitude, longitude, accuracy } = position.coords
-        console.log('📍 位置情報更新:', { lat: latitude, lng: longitude, accuracy })
-        setCurrentLocation([longitude, latitude])
-        setLocationAccuracy(accuracy || 50)
-      },
-      (error) => {
-        console.warn('⚠️ 位置監視エラー:', error.message)
-      },
-      {
-        enableHighAccuracy: false,
-        timeout: 30000,
-        maximumAge: 600000
-      }
-    )
-    
-    setWatchId(newWatchId)
-  }, [watchId])
-
-  
-  
-  // 地図の表示範囲に基づいてスポットを取得する関数（バランス分散版）
-  const loadSpotsForMapBounds = useCallback(async () => {
-    if (!map.current) return
-    
-    try {
-      // 小さなローディングインジケーターを表示
-      setSpotsLoading(true)
+    await safeApiCall(async () => {
+      updateSpotsLoading(true)
       
-      // 地図の表示範囲（bounds）を取得
-      const bounds = map.current.getBounds()
-      const center = map.current.getCenter()
-      const zoom = map.current.getZoom()
-      
-      // 表示範囲から検索半径を動的に計算
-      const ne = bounds.getNorthEast()
-      const sw = bounds.getSouthWest()
-      const latDiff = ne.lat - sw.lat
-      const lngDiff = ne.lng - sw.lng
-      
-      // 表示範囲の対角線距離をベースに検索半径を設定
-      const radius = Math.max(
-        Math.sqrt(latDiff * latDiff + lngDiff * lngDiff) * 111, // 111km = 1度
-        1 // 最小1km
-      ) * 0.7 // 70%の範囲で検索
-      
-      console.log('🗺️ 地図範囲基準でスポット取得（バランス分散）:', {
-        centerLat: center.lat,
-        centerLng: center.lng,
-        bounds: {
-          north: ne.lat,
+      try {
+        // 地図の表示範囲（bounds）を取得（地図操作依存部分）
+        const bounds = map.current!.getBounds()
+        const center = map.current!.getCenter()
+        const zoom = map.current!.getZoom()
+        
+        // 表示範囲から検索半径を動的に計算（地図操作依存部分）
+        const ne = bounds.getNorthEast()
+        const sw = bounds.getSouthWest()
+        const latDiff = ne.lat - sw.lat
+        const lngDiff = ne.lng - sw.lng
+        
+        // 表示範囲の対角線距離をベースに検索半径を設定
+        const radius = Math.max(
+          Math.sqrt(latDiff * latDiff + lngDiff * lngDiff) * 111, // 111km = 1度
+          1 // 最小1km
+        ) * 0.7 // 70%の範囲で検索
+        
+        console.log('🗺️ 地図範囲基準でスポット取得（バランス分散）:', {
+          centerLat: center.lat,
+          centerLng: center.lng,
+          bounds: {
+            north: ne.lat,
+            south: sw.lat,
+            east: ne.lng,
+            west: sw.lng
+          },
+          calculatedRadius: radius.toFixed(2) + 'km',
+          zoom,
+          selectedCategories: selectedCategories.length
+        })
+        
+        // 純粋なAPIロジックを実行（hooks経由）
+        const result = await fetchSpotsDataForBounds({
           south: sw.lat,
-          east: ne.lng,
-          west: sw.lng
-        },
-        calculatedRadius: radius.toFixed(2) + 'km',
-        zoom,
-        selectedCategories: selectedCategories.length
-      })
-      
-      // 現在選択されているカテゴリーを使用（デフォルトは飲食店）
-      const categories = selectedCategories.length > 0 
-        ? selectedCategories
-        : ['restaurant']
-      
-      // Overpass APIからスポット取得（表示範囲を考慮）
-      const newSpots = await fetchSpotsFromOverpassBounds({
-        south: sw.lat,
-        west: sw.lng,
-        north: ne.lat,
-        east: ne.lng
-      }, categories)
-      
-      if (newSpots.length > 0) {
-        setSpots(newSpots)
-        console.log(`✅ 地図範囲基準スポット取得完了（バランス分散）: ${newSpots.length} 件`)
-      } else {
-        console.log('⚠️ 地図範囲基準でスポットが見つかりませんでした')
+          west: sw.lng,
+          north: ne.lat,
+          east: ne.lng
+        }, selectedCategories)
+        
+        // 結果に基づいてUI状態を更新
+        if (result.shouldSkip) {
+          updateSpotsLoading(false)
+          return
+        }
+        
+        if (result.error) {
+          console.error('❌ 地図範囲基準スポット取得エラー:', result.error)
+          updateSpotsLoading(false)
+          return
+        }
+        
+        if (result.spots) {
+          if (result.spots.length > 0) {
+            updateSpots(result.spots)
+            console.log(`✅ 地図範囲基準スポット取得完了（バランス分散）: ${result.spots.length} 件`)
+          } else {
+            console.log('⚠️ 地図範囲基準でスポットが見つかりませんでした')
+          }
+        }
+        
+      } catch (error) {
+        console.error('❌ 地図範囲基準スポット取得wrapper エラー:', error)
+      } finally {
+        updateSpotsLoading(false)
       }
-    } catch (error) {
-      console.error('❌ 地図範囲基準スポット取得エラー:', error)
-    } finally {
-      setSpotsLoading(false)
-    }
-  }, [selectedCategories])
+    }, '地図範囲ベーススポット取得')
+  }, [safeApiCall, fetchSpotsDataForBounds, selectedCategories, updateSpots, updateSpotsLoading])
 
-  // 地図移動時にスポットを更新する関数（デバウンス付き・範囲ベース）
+  // 地図操作開始の検知
+  const handleMapMoveStart = useCallback(() => {
+    console.log('🚀 地図操作開始検知 - API呼び出し一時停止')
+    setIsMapMoving(true)
+    
+    // 既存のタイマーをクリア
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = null
+    }
+    if (mapMoveTimeoutRef.current) {
+      clearTimeout(mapMoveTimeoutRef.current)
+      mapMoveTimeoutRef.current = null
+    }
+  }, [])
+
+  // 地図移動時にスポットを更新する関数（スマート制御版）
   const updateSpotsOnMapMove = useCallback(() => {
     if (!map.current) return
     
@@ -863,123 +826,31 @@ export default function HomePage() {
     const center = map.current.getCenter()
     const zoom = map.current.getZoom()
     
-    console.log('🗺️ 地図移動終了、スポット更新（デバウンス開始・範囲ベース）:', {
+    console.log('🗺️ 地図移動終了検知:', {
       centerLat: center.lat,
       centerLng: center.lng,
       zoom,
+      isMapMoving,
       selectedCategories: selectedCategories.length
     })
     
-    // 既存のタイマーをクリア
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current)
+    // 地図操作完了の判定（2秒後に確定）
+    if (mapMoveTimeoutRef.current) {
+      clearTimeout(mapMoveTimeoutRef.current)
     }
     
-    // 1秒後にスポット取得を実行（デバウンス）
-    debounceTimerRef.current = setTimeout(() => {
-      console.log('🕒 デバウンス完了、範囲ベーススポット取得実行')
-      loadSpotsForMapBounds()
-    }, 1000)
-  }, [loadSpotsForMapBounds])
-
-  // 実際の位置情報取得関数（重複実行防止強化版）
-  const requestLocationPermission = useCallback(async (forceRequest = false): Promise<boolean> => {
-    // 重複実行防止（Refベース）
-    if (locationRequestRef.current && !forceRequest) {
-      console.log('📍 位置情報取得が既に進行中です (Ref)')
-      return false
-    }
-    
-    // State重複実行防止
-    if (locationRequestInProgress && !forceRequest) {
-      console.log('📍 位置情報取得が既に進行中です (State)')
-      return false
-    }
-
-    locationRequestRef.current = true
-    setLocationRequestInProgress(true)
-
-    const FALLBACK_LOCATION: [number, number] = [139.5, 35.7] // 東京都心部広域
-    
-    try {
-      console.log('📍 位置情報取得開始 - 環境情報:', {
-        userAgent: navigator.userAgent,
-        isSecureContext: window.isSecureContext,
-        protocol: window.location.protocol,
-        hostname: window.location.hostname,
-        hasUserGesture
-      })
-
-      // iOS Safari検出
-      const isIosSafari = /iPhone|iPad/.test(navigator.userAgent) && 
-                         /Safari/.test(navigator.userAgent) && 
-                         !/Chrome|CriOS|FxiOS|EdgiOS/.test(navigator.userAgent)
+    mapMoveTimeoutRef.current = setTimeout(() => {
+      console.log('✅ 地図操作完全停止を確認 - API呼び出し許可')
+      setIsMapMoving(false)
       
-      console.log('📍 ブラウザタイプ:', isIosSafari ? 'iOS Safari' : 'その他')
+      // さらに2秒待機してからAPI呼び出し（レート制限対策）
+      debounceTimerRef.current = setTimeout(() => {
+        console.log('🕒 デバウンス完了、範囲ベーススポット取得実行')
+        loadSpotsForMapBounds()
+      }, 2000)
+    }, 2000) // 2秒間操作がないことを確認
+  }, [loadSpotsForMapBounds, selectedCategories, isMapMoving])
 
-      // iOS Safari 18.5のuser gesture制約チェックを一時的に無効化
-      // if (isIosSafari && !hasUserGesture && !forceRequest) {
-      //   console.log('📍 iOS Safari - ユーザージェスチャー待機中、フォールバック使用')
-      //   setCurrentLocation(FALLBACK_LOCATION)
-      //   setLocationAccuracy(50)
-      //   return false
-      // }
-      
-      // 許可状態を確認
-      if ('permissions' in navigator) {
-        try {
-          const permission = await navigator.permissions.query({ name: 'geolocation' })
-          console.log('📍 位置情報許可状態:', permission.state)
-          
-          if (permission.state === 'denied') {
-            console.log('⚠️ 位置情報許可が拒否されています、フォールバック使用')
-            setCurrentLocation(FALLBACK_LOCATION)
-            setLocationAccuracy(50)
-            return false
-          }
-        } catch (error) {
-          console.log('📍 許可状態確認不可、位置情報取得を継続します')
-        }
-      }
-
-      // ブラウザ別最適化設定（CoreLocation・Chrome対応）
-      const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent)
-      
-      const options = {
-        enableHighAccuracy: false, // 全ブラウザ共通で低精度・高速
-        timeout: 3000, // 3秒で短縮
-        maximumAge: 300000 // 5分キャッシュ
-      }
-      
-      console.log('📍 位置情報を取得試行...', options)
-      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, options)
-      })
-
-      const { latitude, longitude, accuracy } = position.coords
-      console.log('✅ 位置情報取得成功:', { lat: latitude, lng: longitude, accuracy })
-      const newLocation: [number, number] = [longitude, latitude]
-      setCurrentLocation(newLocation)
-      setLocationAccuracy(accuracy || 100)
-      console.log('📍 currentLocation状態更新:', newLocation)
-      
-      // 成功したら継続監視開始
-      startLocationWatch()
-      return true
-
-    } catch (error: any) {
-      console.log('❌ 位置情報取得失敗（即座にフォールバック使用）:', error.message)
-      
-      // 再試行は行わず、即座にフォールバック位置を使用
-      console.log('🔄 フォールバック位置を使用:', FALLBACK_LOCATION)
-      setCurrentLocation(FALLBACK_LOCATION)
-      setLocationAccuracy(50)
-      return false
-    } finally {
-      locationRequestRef.current = false
-      setLocationRequestInProgress(false)
-    }
-  }, [hasUserGesture, watchId, startLocationWatch])
 
   // 初期化時の位置情報取得（高速化・フォールバック優先）
   useEffect(() => {
@@ -987,8 +858,8 @@ export default function HomePage() {
     
     // 即座にフォールバック位置を設定してUIの初期化を完了
     const FALLBACK_LOCATION: [number, number] = [139.5, 35.7] // 東京都心部広域
-    setCurrentLocation(FALLBACK_LOCATION)
-    setLocationAccuracy(50)
+    updateCurrentLocation(FALLBACK_LOCATION)
+    updateLocationAccuracy(50)
     console.log('✅ フォールバック位置を即座に設定:', FALLBACK_LOCATION)
     
     if (!navigator.geolocation) {
@@ -1010,8 +881,8 @@ export default function HomePage() {
         })
 
         const { latitude, longitude, accuracy } = position.coords
-        setCurrentLocation([longitude, latitude])
-        setLocationAccuracy(accuracy || 100)
+        updateCurrentLocation([longitude, latitude])
+        updateLocationAccuracy(accuracy || 100)
         console.log('✅ 背景での位置情報取得成功:', { lat: latitude, lng: longitude, accuracy })
         
       } catch (error: any) {
@@ -1032,17 +903,37 @@ export default function HomePage() {
     }
   }, []) // 依存関係を空配列に変更して初回のみ実行
 
-  // スポット取得のuseEffect
+  // 🚨 統合スポット取得制御（重複実行完全防止）
   useEffect(() => {
-    loadSpots()
-  }, [loadSpots])
-  
-  // カテゴリーまたはエリア変更時にスポットを再取得
-  useEffect(() => {
-    if (currentLocation || selectedAreaId !== 'current') {
-      loadSpots()
+    const shouldSkip = isApiCallInProgress.current
+    
+    console.log('🔄 統合スポット取得制御:', { 
+      mapLoaded, 
+      selectedCategories: selectedCategories.length, 
+      selectedAreaId,
+      hasLocation: !!currentLocation,
+      isApiCallInProgress: shouldSkip,
+      queueLength: apiCallQueue.current.length
+    })
+    
+    if (shouldSkip) {
+      console.log('⏸️ API呼び出し中のため統合スポット取得をスキップ')
+      return
     }
-  }, [selectedCategories, selectedAreaId, currentLocation, loadSpots]) // currentLocationの依存関係を復元
+    
+    // 地図ロード状態に基づく適切なスポット取得方法の選択
+    if (mapLoaded && map.current) {
+      // 地図がロード済みの場合は範囲ベーススポット取得を使用
+      console.log('🗺️ 地図ロード済み - 範囲ベーススポット取得を実行')
+      loadSpotsForMapBounds()
+    } else if (currentLocation || selectedAreaId !== 'current') {
+      // 地図未ロードの場合のみ固定位置検索を使用
+      console.log('📍 地図未ロード - 固定位置スポット取得を実行')
+      loadSpots()
+    } else {
+      console.log('⏳ 条件が不足しているためスポット取得をスキップ')
+    }
+  }, [selectedCategories, selectedAreaId, currentLocation, mapLoaded, loadSpots, loadSpotsForMapBounds])
   
   // spotsまたはaddedSpotIdsが更新されたらマーカーを更新
   useEffect(() => {
@@ -1070,7 +961,7 @@ export default function HomePage() {
       }
 
       console.log('📍 ユーザージェスチャー検出:', eventType)
-      setHasUserGesture(true)
+      updateHasUserGesture(true)
 
       // 位置情報取得を試行
       const success = await requestLocationPermission(true)
@@ -1088,7 +979,7 @@ export default function HomePage() {
           const response = await (window.DeviceOrientationEvent as any).requestPermission()
           if (response === 'granted') {
             console.log('🧭 方位センサー許可成功')
-            setOrientationPermissionNeeded(false)
+            updateOrientationPermissionNeeded(false)
             
             // イベントリスナーを登録
             const handleDeviceOrientation = (event: DeviceOrientationEvent) => {
@@ -1102,7 +993,7 @@ export default function HomePage() {
                 } else {
                   return
                 }
-                setDeviceHeading(heading)
+                updateDeviceHeading(heading)
                 console.log('🧭 方位更新:', heading.toFixed(1) + '°')
               }
             }
@@ -1174,7 +1065,7 @@ export default function HomePage() {
           return
         }
         
-        setDeviceHeading(heading)
+        updateDeviceHeading(heading)
         console.log('🧭 方位更新:', heading.toFixed(1) + '°')
       }
     }
@@ -1201,11 +1092,11 @@ export default function HomePage() {
         if (isIosSafari) {
           // iOS Safariでは統合された自動許可戦略に任せる
           console.log('🧭 iOS Safari - 統合戦略により自動処理される')
-          setOrientationPermissionNeeded(true)
+          updateOrientationPermissionNeeded(true)
         } else {
           // iOS Chrome等では従来通り手動許可
           console.log('🧭 iOS Chrome等 - 手動許可が必要')
-          setOrientationPermissionNeeded(true)
+          updateOrientationPermissionNeeded(true)
         }
       } else {
         // Chrome、Android等 - Chrome 83以降では許可が必要
@@ -1260,11 +1151,11 @@ export default function HomePage() {
           } else {
             console.log('⚠️ Chrome Device Orientation API 利用不可 - ユーザージェスチャー後に再試行')
             // ユーザージェスチャー検出後の統合戦略に任せる
-            setOrientationPermissionNeeded(true)
+            updateOrientationPermissionNeeded(true)
           }
         } catch (error) {
           console.error('❌ Chrome Device Orientation API 設定エラー:', error)
-          setOrientationPermissionNeeded(true)
+          updateOrientationPermissionNeeded(true)
         }
       }
     }
@@ -1368,6 +1259,9 @@ export default function HomePage() {
           }
         })
         
+        // 地図ロード状態をリセット
+        setMapLoaded(false)
+        
         try {
           const mapInstance = new maplibregl.Map({
             container: container,
@@ -1404,6 +1298,8 @@ export default function HomePage() {
             try {
               console.log('✅ 地図初期化完了')
               setLoading(false)
+              setMapLoaded(true) // 地図ロード完了状態を設定
+              console.log('🎯 mapLoaded状態をtrueに設定完了')
               
               // 地図初期化完了後に現在地マーカーを追加
               if (currentLocation && !currentLocationMarker.current) {
@@ -1429,6 +1325,10 @@ export default function HomePage() {
                 console.log('🗺️ 地図ロード完了後にスポットマーカーを更新:', spots.length)
                 updateSpotMarkers(spots)
               }
+              
+              // 地図ロード完了後のスポット取得は一時的に無効化（レート制限対策）
+              // console.log('🔄 地図ロード完了後の初期スポット取得')
+              // loadSpotsForMapBounds()
               
               // 地図ロード完了を少し待ってから再度マーカーを確認
               setTimeout(() => {
@@ -1467,10 +1367,7 @@ export default function HomePage() {
           mapInstance.on('load', handleLoad)
           mapInstance.on('error', handleError)
           
-          // 地図移動終了時にスポットを更新
-          mapInstance.on('moveend', () => {
-            updateSpotsOnMapMove()
-          })
+          // moveendイベントリスナーは別のuseEffectで管理
 
 
           console.log('🗺️ 地図初期化処理完了、ロードイベント待機中...')
@@ -1514,13 +1411,66 @@ export default function HomePage() {
 
     return () => {
       if (cleanup) cleanup()
-      // デバウンスタイマーのクリーンアップ
+      // 全タイマーのクリーンアップ（レート制限対策）
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current)
         debounceTimerRef.current = null
       }
+      if (mapMoveTimeoutRef.current) {
+        clearTimeout(mapMoveTimeoutRef.current)
+        mapMoveTimeoutRef.current = null
+      }
+      
+      // APIキューと制御フラグのクリーンアップ
+      apiCallQueue.current = []
+      isApiCallInProgress.current = false
+      
+      console.log('🧹 地図関連タイマー・API制御の完全クリーンアップ')
     }
-  }, [shouldInitializeMap, updateSpotsOnMapMove]) // currentLocationの依存関係を除去
+  }, [shouldInitializeMap, loadSpotsForMapBounds]) // loadSpotsForMapBoundsを追加してhandleLoad内で使用可能にする
+
+  // moveendイベントリスナー専用管理（地図ロード完了後に設定）
+  useEffect(() => {
+    if (!map.current || !mapLoaded) return
+
+    console.log('🎧 moveendイベントリスナー設定 (地図ロード完了後)', {
+      mapRef: !!map.current,
+      mapLoaded,
+      updateSpotsOnMapMove: typeof updateSpotsOnMapMove,
+      mapInstance: map.current?.getContainer?.()?.id
+    })
+    
+    const handleMoveStart = () => {
+      console.log('🎧 movestartイベント発火')
+      handleMapMoveStart()
+    }
+    
+    const handleMoveEnd = () => {
+      console.log('🎧 moveendイベント発火')
+      updateSpotsOnMapMove()
+    }
+
+    console.log('🎧 地図操作イベントリスナーを登録中...', {
+      movestart: typeof handleMoveStart,
+      moveend: typeof handleMoveEnd
+    })
+    map.current.on('movestart', handleMoveStart)
+    map.current.on('moveend', handleMoveEnd)
+    map.current.on('zoomstart', handleMoveStart) // ズーム開始も操作開始として扱う
+    map.current.on('zoomend', handleMoveEnd) // ズーム終了も操作終了として扱う
+    console.log('✅ 地図操作イベントリスナー登録完了')
+
+    // クリーンアップ: 地図操作イベントリスナーを削除
+    return () => {
+      if (map.current) {
+        console.log('🎧 地図操作イベントリスナー削除')
+        map.current.off('movestart', handleMoveStart)
+        map.current.off('moveend', handleMoveEnd)
+        map.current.off('zoomstart', handleMoveStart)
+        map.current.off('zoomend', handleMoveEnd)
+      }
+    }
+  }, [updateSpotsOnMapMove, handleMapMoveStart, mapLoaded]) // 地図操作関数も依存関係に追加
 
   // 現在地マーカーの更新（位置と方位）
   useEffect(() => {
@@ -1645,7 +1595,7 @@ export default function HomePage() {
           return
         }
         
-        setDeviceHeading(heading)
+        updateDeviceHeading(heading)
         console.log('🧭 User Gesture後の方位更新:', heading.toFixed(1) + '°')
       }
     }
@@ -1676,17 +1626,28 @@ export default function HomePage() {
     }
   }
 
-  // 現在地ボタン
+  // 現在地ボタン（API制御システム独立）
   const handleCurrentLocation = async () => {
-    console.log('📍 現在地ボタンクリック - User Gesture検出')
-    setHasUserGesture(true) // ユーザージェスチャーマーク
+    console.log('📍 現在地ボタンクリック - User Gesture検出', {
+      hasCurrentLocation: !!currentLocation,
+      hasMap: !!map.current,
+      mapLoaded: map.current?.loaded(),
+      isApiCallInProgress: isApiCallInProgress.current
+    })
+    
+    // 現在地ボタンは位置情報取得のみなのでAPI制御システムをバイパス
+    updateHasUserGesture(true) // ユーザージェスチャーマーク
 
     // 方位センサーをUser Gesture後に有効化（Chrome対応）
     if (orientationPermissionNeeded) {
       console.log('🧭 User Gesture後の方位センサー有効化試行')
-      const success = await requestChromeOrientationPermission()
-      if (success) {
-        setOrientationPermissionNeeded(false)
+      try {
+        const success = await requestChromeOrientationPermission()
+        if (success) {
+          updateOrientationPermissionNeeded(false)
+        }
+      } catch (error) {
+        console.error('❌ 方位センサー有効化エラー:', error)
       }
     }
 
@@ -1697,19 +1658,49 @@ export default function HomePage() {
       
       if (isUsingFallback) {
         console.log('📍 フォールバック位置検出 - 実際の位置情報取得を試行')
-        await requestLocationPermission(true)
+        try {
+          const success = await requestLocationPermission(true)
+          if (success && currentLocation) {
+            // 位置情報取得成功の場合は新しい位置に移動
+            console.log('📍 新しい位置情報で地図を移動:', currentLocation)
+            map.current.flyTo({
+              center: currentLocation,
+              zoom: 15,
+              bearing: 0
+            })
+          } else {
+            // 位置情報取得失敗または拒否の場合はフォールバック位置に移動
+            console.log('📍 フォールバック位置のまま地図を移動:', currentLocation)
+            map.current.flyTo({
+              center: currentLocation,
+              zoom: 12, // フォールバック時は少し広めの表示
+              bearing: 0
+            })
+          }
+          console.log('✅ 位置情報再取得完了')
+        } catch (error) {
+          console.error('❌ 位置情報再取得エラー:', error)
+          // エラーの場合でもフォールバック位置に移動
+          console.log('📍 エラー時フォールバック位置に地図を移動:', currentLocation)
+          map.current.flyTo({
+            center: currentLocation,
+            zoom: 12,
+            bearing: 0
+          })
+        }
       } else {
         console.log('📍 現在地へ地図を移動:', currentLocation)
-        map.current.flyTo({
-          center: currentLocation,
-          zoom: 15, // ズームレベルを上げて詳細表示
-          bearing: 0 // 北向きに設定
-        })
-        
-        // 現在地マーカーが存在しない場合は作成
-        if (!currentLocationMarker.current) {
-          console.log('📍 現在地ボタンクリック時にマーカーが存在しないため作成')
-          try {
+        try {
+          map.current.flyTo({
+            center: currentLocation,
+            zoom: 15, // ズームレベルを上げて詳細表示
+            bearing: 0 // 北向きに設定
+          })
+          console.log('✅ 地図移動完了')
+          
+          // 現在地マーカーが存在しない場合は作成
+          if (!currentLocationMarker.current) {
+            console.log('📍 現在地ボタンクリック時にマーカーが存在しないため作成')
             const markerElement = createCurrentLocationMarker()
             currentLocationMarker.current = new maplibregl.Marker({ 
               element: markerElement,
@@ -1718,15 +1709,72 @@ export default function HomePage() {
               .setLngLat(currentLocation)
               .addTo(map.current)
             console.log('✅ 現在地ボタン経由でマーカー作成完了')
-          } catch (err) {
-            console.error('❌ 現在地ボタン経由でマーカー作成エラー:', err)
           }
+        } catch (err) {
+          console.error('❌ 現在地ボタン経由で地図移動エラー:', err)
         }
       }
     } else if (!currentLocation) {
       // 位置情報がない場合は取得を試行
       console.log('📍 位置情報がないため取得を試行')
-      await requestLocationPermission(true)
+      try {
+        const success = await requestLocationPermission(true)
+        if (success) {
+          console.log('✅ 初回位置情報取得成功 - 地図が更新されます')
+          // 位置情報取得成功後、少し待ってから地図を移動
+          setTimeout(() => {
+            if (currentLocation && map.current) {
+              console.log('📍 取得した位置情報で地図を移動:', currentLocation)
+              map.current.flyTo({
+                center: currentLocation,
+                zoom: 15,
+                bearing: 0
+              })
+            }
+          }, 500)
+        } else {
+          console.log('❌ 位置情報取得に失敗しました - フォールバック位置を使用')
+          // 位置情報が拒否されている場合の対処
+          if (currentLocation) {
+            console.log('📍 フォールバック位置で地図を移動:', currentLocation)
+            map.current!.flyTo({
+              center: currentLocation,
+              zoom: 15,
+              bearing: 0
+            })
+          }
+          // iOS Safari HTTP接続の場合の詳細説明
+          const isIOSSafariHttp = /iPhone|iPad/.test(navigator.userAgent) && 
+                                 /Safari/.test(navigator.userAgent) && 
+                                 window.location.protocol === 'http:'
+          
+          if (isIOSSafariHttp) {
+            alert(`📍 位置情報が利用できません
+
+原因：iOS SafariではHTTP接続時に位置情報が制限されます
+
+解決方法：
+HTTPS接続を使用してください
+
+現在は東京を表示しています。`)
+          } else {
+            alert(`📍 位置情報アクセスが拒否されています
+
+解決方法：
+1. ブラウザのアドレスバー左の🔒マークをタップ
+2. 「位置情報」を「許可」に変更  
+3. ページを再読み込み
+
+現在は東京を表示しています。`)
+          }
+        }
+      } catch (error) {
+        console.error('❌ 初回位置情報取得エラー:', error)
+        alert('位置情報の取得でエラーが発生しました。ブラウザの設定を確認してください。')
+      }
+    } else if (!map.current) {
+      console.log('⚠️ 地図が初期化されていないため現在地ボタン処理をスキップ')
+      alert('地図の初期化中です。少し待ってからもう一度お試しください。')
     }
   }
 
@@ -1911,10 +1959,52 @@ export default function HomePage() {
         )}
       </div>
 
+      {/* 手動スポット更新ボタン（レート制限対策） */}
+      <button
+        onClick={() => {
+          console.log('🔄 手動スポット更新ボタンクリック', {
+            isMapMoving,
+            isApiCallInProgress: isApiCallInProgress.current,
+            spotsLoading
+          })
+          
+          if (isMapMoving || isApiCallInProgress.current) {
+            console.log('⚠️ 地図操作中またはAPI呼び出し中のため手動更新をスキップ')
+            return
+          }
+          
+          if (mapLoaded && map.current) {
+            loadSpotsForMapBounds()
+          } else if (currentLocation) {
+            loadSpots()
+          } else {
+            console.log('⚠️ 地図未ロードかつ現在地未取得のため手動更新をスキップ')
+          }
+        }}
+        className={`fixed right-4 rounded-full p-2 shadow-lg z-40 ${
+          spotsLoading || isMapMoving || isApiCallInProgress.current 
+            ? 'bg-gray-200 text-gray-400' 
+            : 'bg-white text-gray-600 hover:bg-gray-50'
+        }`}
+        style={{ top: '120px' }}
+        aria-label="この範囲のスポットを更新"
+        disabled={spotsLoading || isMapMoving || isApiCallInProgress.current}
+      >
+        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+        </svg>
+      </button>
+
       {/* 現在地ボタン */}
       <button
-        onClick={handleCurrentLocation}
-        className="fixed right-4 bg-white rounded-full p-3 shadow-lg z-40"
+        onClick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          console.log('🖱️ 現在地ボタン物理クリック検出')
+          handleCurrentLocation()
+        }}
+        className="fixed right-4 bg-white rounded-full p-3 shadow-lg z-50 cursor-pointer hover:bg-gray-50 active:bg-gray-100 transition-colors border border-gray-200"
         style={{ top: '180px' }}
         aria-label="現在地を表示"
         title="現在地を地図の中心に移動します"
@@ -1942,7 +2032,7 @@ export default function HomePage() {
         >
           {/* クローズボタン */}
           <button
-            onClick={() => setSelectedSpot(null)}
+            onClick={() => updateSelectedSpot(null)}
             className="absolute top-2 right-2 w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center hover:bg-gray-200 transition-colors"
             aria-label="閉じる"
           >
@@ -1963,8 +2053,8 @@ export default function HomePage() {
             {/* ルートに追加ボタン */}
             <button
               onClick={() => {
-                setAddedSpotIds(prev => new Set(Array.from(prev).concat(selectedSpot.id)))
-                setSelectedSpot(null)
+                addSpotId(selectedSpot.id)
+                updateSelectedSpot(null)
               }}
               disabled={addedSpotIds.has(selectedSpot.id)}
               className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ml-3"
@@ -2181,7 +2271,7 @@ export default function HomePage() {
                 <div className="space-y-3">
                   <div className="mb-4 flex items-center">
                     <button
-                      onClick={() => setSelectedRegion(null)}
+                      onClick={() => updateSelectedRegion(null)}
                       className="mr-2 p-1 rounded-lg hover:bg-gray-100"
                     >
                       <svg className="w-5 h-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
