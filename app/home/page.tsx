@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { fetchSpotsFromOverpass, fetchAddressFromNominatim, fetchSpotsFromOverpassBounds, fetchPrefectureBoundaryData } from './api'
+import { fetchSpotsFromOverpass, fetchAddressFromNominatim, fetchSpotsFromOverpassBounds, fetchPrefectureBoundaryData, getCacheKey, getCachedSpots, setCachedSpots } from './api'
 
 // 型定義インポート
 import type { OverpassSpot, RouteSpot, SpotCategory, SearchChip, AreaOption, FilterState, DeviceOrientationEventWithWebkit, PrefectureBoundaryData } from './types'
@@ -240,35 +240,7 @@ const getMarkerIcon = (spot: OverpassSpot, isSelected: boolean = false): string 
   }
 }
 
-// キャッシュ機能（メモリベース）
-const spotsCache = new Map<string, { data: OverpassSpot[], timestamp: number }>()
-
-// キャッシュキーを生成
-const getCacheKey = (lat: number, lng: number, radius: number, categories: string[]): string => {
-  return `${Math.round(lat * 1000)}_${Math.round(lng * 1000)}_${radius}_${categories.sort().join(',')}`
-}
-
-// キャッシュからスポットを取得（有効期限チェック）
-const getCachedSpots = (cacheKey: string): OverpassSpot[] | null => {
-  const cached = spotsCache.get(cacheKey)
-  if (!cached) return null
-  
-  const isExpired = Date.now() - cached.timestamp > CACHE_DURATION
-  if (isExpired) {
-    spotsCache.delete(cacheKey)
-    return null
-  }
-  
-  return cached.data
-}
-
-// スポットをキャッシュに保存
-const setCachedSpots = (cacheKey: string, spots: OverpassSpot[]): void => {
-  spotsCache.set(cacheKey, {
-    data: spots,
-    timestamp: Date.now()
-  })
-}
+// キャッシュ機能は api.ts に移行済み
 
 // 人気タグのダミーデータ
 

@@ -331,6 +331,68 @@ export const fetchPrefectureBoundaryData = async (
     return null
   }
 }
+// キャッシュマネージャークラス（シングルトン）
+class SpotsCacheManager {
+  private static instance: SpotsCacheManager
+  private cache: Map<string, { data: OverpassSpot[], timestamp: number }>
+  private readonly CACHE_DURATION = 10 * 60 * 1000 // 10分
+
+  private constructor() {
+    this.cache = new Map()
+  }
+
+  static getInstance(): SpotsCacheManager {
+    if (!SpotsCacheManager.instance) {
+      SpotsCacheManager.instance = new SpotsCacheManager()
+    }
+    return SpotsCacheManager.instance
+  }
+
+  // キャッシュキー生成（既存ロジックそのまま）
+  getCacheKey(lat: number, lng: number, radius: number, categories: string[]): string {
+    return `${Math.round(lat * 1000)}_${Math.round(lng * 1000)}_${radius}_${categories.sort().join(',')}`
+  }
+
+  // キャッシュ取得（既存の getCachedSpots を置き換え）
+  get(cacheKey: string): OverpassSpot[] | null {
+    const cached = this.cache.get(cacheKey)
+    if (!cached) return null
+    
+    const isExpired = Date.now() - cached.timestamp > this.CACHE_DURATION
+    if (isExpired) {
+      this.cache.delete(cacheKey)
+      return null
+    }
+    
+    return cached.data
+  }
+
+  // キャッシュ保存（既存の setCachedSpots を置き換え）
+  set(cacheKey: string, spots: OverpassSpot[]): void {
+    this.cache.set(cacheKey, {
+      data: spots,
+      timestamp: Date.now()
+    })
+  }
+
+  // キャッシュクリア（オプション）
+  clear(): void {
+    this.cache.clear()
+  }
+}
+
+// エクスポート用のラッパー関数（互換性維持）
+export const getCacheKey = (lat: number, lng: number, radius: number, categories: string[]): string => {
+  return SpotsCacheManager.getInstance().getCacheKey(lat, lng, radius, categories)
+}
+
+export const getCachedSpots = (cacheKey: string): OverpassSpot[] | null => {
+  return SpotsCacheManager.getInstance().get(cacheKey)
+}
+
+export const setCachedSpots = (cacheKey: string, spots: OverpassSpot[]): void => {
+  SpotsCacheManager.getInstance().set(cacheKey, spots)
+}
 
 // TODO: 残りのAPI関数を順次移動予定
 // - fetchSpotsFromOverpass
